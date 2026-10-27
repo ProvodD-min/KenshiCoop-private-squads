@@ -679,10 +679,41 @@ index 03ba1db..d592f17 100644
  
  namespace {
 diff --git a/src/plugin/net/NetLink.cpp b/src/plugin/net/NetLink.cpp
-index 2c1995b..aea5231 100644
+index 2c1995b..1377248 100644
 --- a/src/plugin/net/NetLink.cpp
 +++ b/src/plugin/net/NetLink.cpp
-@@ -252,24 +252,35 @@ void NetLink::queueInvXferAck(const InvXferAckPacket& pkt) { pushLocked(outCs_,
+@@ -27,6 +27,30 @@ const enet_uint8 CH_UNRELIABLE = 1;  // entity batches / stealth / cam (newest s
+ const enet_uint8 CH_BULK       = 2;  // coordinated save/load transfer (bulk reliable)
+ const int        CH_COUNT      = 3;  // channels negotiated at host-create / connect
+ 
++// Only the network thread reads these ENet-owned lists. Limit queued bulk,
++// rather than all traffic, so a slow tunnel can still carry game controls.
++size_t pendingBulkList(ENetList* list) {
++    size_t bytes = 0;
++    for (ENetListIterator it = enet_list_begin(list); it != enet_list_end(list);
++         it = enet_list_next(it)) {
++        ENetOutgoingCommand* command = (ENetOutgoingCommand*)it;
++        if (command->command.header.channelID == CH_BULK)
++            bytes += command->fragmentLength;
++    }
++    return bytes;
++}
++size_t pendingBulk(ENetHost* host) {
++    size_t largest = 0;
++    for (size_t i = 0; i < host->peerCount; ++i) {
++        ENetPeer* peer = &host->peers[i];
++        size_t bytes = pendingBulkList(&peer->sentReliableCommands)
++                     + pendingBulkList(&peer->outgoingSendReliableCommands)
++                     + pendingBulkList(&peer->outgoingCommands);
++        if (bytes > largest) largest = bytes;
++    }
++    return largest;
++}
++
+ // Net-thread diagnostics. OutputDebugStringA is thread-safe, and CoopLog guards
+ // its FILE* with a lock, so both are safe to call off the main thread.
+ void netLog(const char* msg) {
+@@ -252,24 +276,35 @@ void NetLink::queueInvXferAck(const InvXferAckPacket& pkt) { pushLocked(outCs_,
  
  void NetLink::queueSaveReq(const SaveReqPacket& pkt) { pushLocked(outCs_, outSaveReq_, pkt); }
  
@@ -729,15 +760,58 @@ index 2c1995b..aea5231 100644
  }
  
  void NetLink::queueSaveAck(const SaveAckPacket& pkt) { pushLocked(outCs_, outSaveAck_, pkt); }
-@@ -400,6 +411,7 @@ void NetLink::threadLoop() {
+@@ -364,6 +399,9 @@ void NetLink::threadLoop() {
+     // The tunnel is addressless; ENet still needs an ENetAddress for its peer
+     // routing, so both sides use the fabricated "1.0.0.1:port".
+     const bool steam = (steamPeer_ != 0);
++    const char* networkProfile = std::getenv("KENSHICOOP_NETWORK_PROFILE");
++    const bool porthole = networkProfile && std::strcmp(networkProfile, "porthole") == 0;
++    const bool smallDatagrams = steam || porthole;
+     if (steam) {
+         if (steamp2p::installEnetHooks(port_)) {
+             netLog("transport=steam (ENet tunnelled over Steam P2P)");
+@@ -378,10 +416,13 @@ void NetLink::threadLoop() {
+         addr.port = (enet_uint16)port_;
+         enetHost_ = enet_host_create(&addr, 8 /*peers*/, CH_COUNT /*channels*/, 0, 0);
+         if (!enetHost_) { netErr("host create failed"); InterlockedExchange(&running_, 0); return; }
++        if (smallDatagrams) enetHost_->mtu = 1200;
+         netLog("hosting");
+     } else {
+         enetHost_ = enet_host_create(0, 1, CH_COUNT, 0, 0);
+         if (!enetHost_) { netErr("client create failed"); InterlockedExchange(&running_, 0); return; }
++        // Clamp before connect: ENet serializes our MTU into CONNECT here.
++        if (smallDatagrams) enetHost_->mtu = 1200;
+         ENetAddress addr;
+         if (steam) enet_address_set_host_ip(&addr, "1.0.0.1");
+         else       enet_address_set_host(&addr, ip_.c_str());
+@@ -394,13 +435,16 @@ void NetLink::threadLoop() {
+     // Steam's unreliable P2P packets cap at 1200 bytes; clamp the MTU so every
+     // ENet datagram (including fragments of large reliable packets) fits one
+     // P2P packet. Set before any peer negotiates its own MTU from ours.
+-    if (steam && enetHost_ && enetHost_->mtu > 1200) {
++    if (smallDatagrams && enetHost_ && enetHost_->mtu > 1200) {
+         enetHost_->mtu = 1200;
+         if (serverPeer_) serverPeer_->mtu = 1200;
      }
++    if (porthole) netLog("network-profile=porthole mtu=1200 entity-batch=14");
  
      u32   nextId = 1;
 +    ENetPeer* moneyPeer = 0; // latest accepted guest; reject stale socket funds
      DWORD lastConnectAttempt = GetTickCount();
++    DWORD lastBulkBurst = 0;
  
      // Wall-clock time-sync state (client only). The join pings every ~2 s; each
-@@ -489,6 +501,7 @@ void NetLink::threadLoop() {
+     // pong yields an (rtt, offset) sample; the minimum-RTT sample wins (NTP
+@@ -435,7 +479,7 @@ void NetLink::threadLoop() {
+                 else       enet_address_set_host(&addr, ip_.c_str());
+                 addr.port = (enet_uint16)port_;
+                 serverPeer_ = enet_host_connect(enetHost_, &addr, CH_COUNT, 0);
+-                if (steam && serverPeer_) serverPeer_->mtu = 1200;
++                if (smallDatagrams && serverPeer_) serverPeer_->mtu = 1200;
+                 netLog(serverPeer_ ? "reconnecting" : "reconnect failed");
+             }
+         }
+@@ -489,6 +533,7 @@ void NetLink::threadLoop() {
                                             "not relayed peer-to-peer; expect desync");
                                  }
                                  ev.peer->data = (void*)(size_t)id;
@@ -745,7 +819,7 @@ index 2c1995b..aea5231 100644
                                  WelcomePacket w;
                                  w.type = (u8)PKT_WELCOME; w.version = PROTOCOL_VERSION; w.playerId = id;
                                  ENetPacket* out =
-@@ -721,15 +734,16 @@ void NetLink::threadLoop() {
+@@ -721,15 +766,16 @@ void NetLink::threadLoop() {
                          // (protocol 52). Delivered immediately like the others.
                          MoneyPacket mo;
                          if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &mo)
@@ -765,9 +839,17 @@ index 2c1995b..aea5231 100644
                              inbound_->pushMoneyDelta(md.ownerId, md);
                          }
                      } else if (type == PKT_FACTION) {
-@@ -1703,15 +1717,11 @@ void NetLink::threadLoop() {
-         // floods the channel - and CH_BULK keeps the megabytes off CH_RELIABLE,
-         // so a live transfer no longer stalls door/money/faction events.
+@@ -1698,20 +1744,35 @@ void NetLink::threadLoop() {
+         // Drain + send any queued coordinated-save packets on CH_BULK (protocol
+         // 31; moved off CH_RELIABLE in v44). REQ/ACK are fixed PODs; FILE/DONE
+         // carry their variable tails (ENet fragments + reassembles the ~4 KB
+-        // chunks transparently on the reliable channel). Pacing lives in the
+-        // SaveXfer sender (~32 chunks queued per 50 ms), so one drain never
+-        // floods the channel - and CH_BULK keeps the megabytes off CH_RELIABLE,
+-        // so a live transfer no longer stalls door/money/faction events.
++        // chunks transparently on the reliable channel). A tunnel may be much
++        // slower than SaveXfer's producer. In the opt-in Porthole profile keep
++        // a bounded bulk window in ENet, preserving the stream's FIFO order.
          std::vector<SaveReqPacket>   saveReqs;
 -        std::vector<SaveBeginPacket> saveBegins;
 -        std::vector<OutSaveFile>     saveFiles;
@@ -779,11 +861,31 @@ index 2c1995b..aea5231 100644
 -        saveBegins.swap(outSaveBegin_);
 -        saveFiles.swap(outSaveFile_);
 -        saveDones.swap(outSaveDone_);
-+        saveEvents.swap(outSaveEvents_);
++        if (!porthole) {
++            saveEvents.swap(outSaveEvents_);
++        } else {
++            const DWORD now = GetTickCount();
++            const size_t window = 64 * 1024;
++            const size_t burst = 16 * 1024;
++            const size_t pending = pendingBulk(enetHost_);
++            if (now - lastBulkBurst >= 50 && pending < window) {
++                size_t count = 0, bytes = 0;
++                while (count < outSaveEvents_.size()) {
++                    const size_t next = outSaveEvents_[count].bytes.size();
++                    // Permit one oversized protocol packet, never split it.
++                    if (count && (bytes + next > burst || pending + bytes + next > window)) break;
++                    bytes += next; ++count;
++                    if (bytes >= burst) break;
++                }
++                saveEvents.insert(saveEvents.end(), outSaveEvents_.begin(), outSaveEvents_.begin() + count);
++                outSaveEvents_.erase(outSaveEvents_.begin(), outSaveEvents_.begin() + count);
++                if (count) lastBulkBurst = now;
++            }
++        }
          saveAcks.swap(outSaveAck_);
          LeaveCriticalSection(&outCs_);
          for (size_t i = 0; i < saveReqs.size(); ++i) {
-@@ -1725,8 +1735,11 @@ void NetLink::threadLoop() {
+@@ -1725,8 +1786,11 @@ void NetLink::threadLoop() {
                  enet_packet_destroy(out);
              }
          }
@@ -797,7 +899,7 @@ index 2c1995b..aea5231 100644
                                                   ENET_PACKET_FLAG_RELIABLE);
              if (isHost_) {
                  enet_host_broadcast(enetHost_, CH_BULK, out);
-@@ -1736,37 +1749,6 @@ void NetLink::threadLoop() {
+@@ -1736,37 +1800,6 @@ void NetLink::threadLoop() {
                  enet_packet_destroy(out);
              }
          }
@@ -835,6 +937,15 @@ index 2c1995b..aea5231 100644
          for (size_t i = 0; i < saveAcks.size(); ++i) {
              ENetPacket* out = enet_packet_create(&saveAcks[i], sizeof(SaveAckPacket),
                                                   ENET_PACKET_FLAG_RELIABLE);
+@@ -1832,7 +1865,7 @@ void NetLink::threadLoop() {
+         // fragments: retransmits + ordering stalls on the motion stream). Raw UDP
+         // keeps the full 17-entity chunk. Unreliable: the newest batch supersedes
+         // loss.
+-        const unsigned batchCap = steam ? ENTITY_BATCH_MAX_STEAM : ENTITY_BATCH_MAX;
++        const unsigned batchCap = smallDatagrams ? ENTITY_BATCH_MAX_STEAM : ENTITY_BATCH_MAX;
+         std::vector<EntityState> ents;
+         u32  owner = 0;
+         u32  stamp = 0;
 diff --git a/src/plugin/net/NetLink.h b/src/plugin/net/NetLink.h
 index 8d66419..413a899 100644
 --- a/src/plugin/net/NetLink.h
@@ -955,6 +1066,247 @@ index a78a6f2..f2dfda7 100644
      SP_KEPT("saveAck",   InboundSaveAck,   drainSaveAcks);
      SP_KEPT("loadGo",    InboundLoadGo,    drainLoadGos);
      SP_KEPT("loadReq",   InboundLoadReq,   drainLoadReqs);
+diff --git a/scripts/porthole/README.md b/scripts/porthole/README.md
+new file mode 100644
+index 0000000..4c8a652
+--- /dev/null
++++ b/scripts/porthole/README.md
+@@ -0,0 +1,57 @@
++# Transport regression test
++
++This harness links the production `NetLink.cpp`, ENet, and the complete
++`SaveXfer.cpp` sender and receiver. Its only engine adapter supplies an isolated
++directory containing generated bytes. No game assets or existing saves are read.
++Steam integration is linked but never initialized.
++
++Use an x64 Visual C++ / Windows SDK command prompt with `cl.exe`, `link.exe`,
++`INCLUDE` and `LIB` configured. The tested compiler is VS2010 SP1 x64
++16.00.40219.01. Python 3.9 or newer is required. From the repository root:
++
++```powershell
++python scripts/porthole/build_netlink_test.py --output <workspace>/transport-build
++python scripts/porthole/test_netlink_relay.py <new-evidence-directory> --exe <workspace>/transport-build/NetLinkQA.exe
++```
++
++Four cases run against an actual pair of production network workers:
++
++* Normal UDP without a profile, allowing 1400-byte datagrams.
++* Negative control: unmodified UDP through a 1200-byte datagram blackhole.
++  This case must fail to deliver motion and the complete save.
++* `KENSHICOOP_NETWORK_PROFILE=porthole` through the same blackhole.
++* The profile with 25 ± 15 ms one-way latency, 1% seeded datagram loss,
++  384 KiB/s per direction and a bounded relay queue.
++
++Positive cases require a generated 3 MiB save and metadata to arrive with matching
++SHA-256 per file, successful receiver commit and sender ACK, motion and reliable
++control progress in both directions, and maximum observed motion gap / control
++latency below three seconds. The production transfer also validates its own CRC.
++The output directory must not already exist. All generated files and logs stay
++there. A simulated blackhole is a regression condition, not a claim that Porthole
++itself imposes a 1200-byte limit.
++
++For an independently prepared UDP tunnel, the native harness can also run
++directly. First create `<host-test-dir>/save/generated/quick.save` with generated
++test bytes and create the empty guest test directory. Set the profile in both
++processes and run concurrently:
++
++```powershell
++$env:KENSHICOOP_NETWORK_PROFILE='porthole'
++NetLinkQA.exe host <backend-port> <host-test-dir> <host-result.json> 40000
++NetLinkQA.exe join <mapped-local-port> <guest-test-dir> <guest-result.json> 40000
++```
++
++The guest connects to `127.0.0.1:<mapped-local-port>`. Check the JSON, sender ACK,
++receiver commit, and independently compare every generated file's SHA-256. This
++tests a large reliable host-to-guest transfer and bidirectional controls/motion.
++It does not establish WAN performance, a reverse large transfer, combat or other
++gameplay correctness.
++
++The opt-in profile uses a conservative 1200-byte ENet MTU and 14-character
++unreliable batches. It submits roughly 16 KiB of the save stream at most every
++50 ms and pauses bulk submission while a peer has at least 64 KiB of bulk payload
++pending inside ENet. BEGIN/FILE/DONE retain their FIFO order; an individual
++oversized protocol packet is submitted whole. This bounds submitted bulk bursts,
++not the complete application producer queue or all possible network latency.
++Ordinary UDP keeps its existing packet sizes and save submission behavior.
+diff --git a/scripts/porthole/build_netlink_test.py b/scripts/porthole/build_netlink_test.py
+new file mode 100644
+index 0000000..f5d9449
+--- /dev/null
++++ b/scripts/porthole/build_netlink_test.py
+@@ -0,0 +1,28 @@
++"""Build the real Windows transport test in an x64 VC/SDK command prompt.
++
++Requires Python 3.9+, cl/link on PATH, standard INCLUDE/LIB configured.
++No Kenshi install, SDK, import library or game assets are required.
++"""
++from pathlib import Path
++import argparse, os, subprocess
++HERE=Path(__file__).resolve().parent
++REPO=HERE.parents[1]
++
++def main():
++ p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);args=p.parse_args()
++ directory=args.output.resolve();directory.mkdir(parents=True,exist_ok=True)
++ sources=[HERE/'netlink_node.cpp',REPO/'src/plugin/net/NetLink.cpp',REPO/'src/plugin/net/SteamP2P.cpp',REPO/'src/plugin/CoopLog.cpp',REPO/'src/plugin/sync/SaveXfer.cpp']
++ sources += sorted(p for p in (REPO/'third_party/enet/enet').glob('*.c') if p.name!='unix.c')
++ objects=[]
++ with (directory/'build.log').open('w',encoding='utf-8') as log:
++  def run(cmd):
++   result=subprocess.run([str(x) for x in cmd],cwd=directory,capture_output=True,text=True,errors='replace')
++   log.write(subprocess.list2cmdline([str(x) for x in cmd])+'\n'+result.stdout+result.stderr+'\n');log.flush()
++   if result.returncode:raise RuntimeError(result.stdout+result.stderr)
++  for i,source in enumerate(sources):
++   obj=directory/(str(i)+'.obj');objects.append(obj)
++   run(['cl.exe','/nologo','/c','/O2','/MD','/DENET_STATIC','/DWIN32_LEAN_AND_MEAN','/D_CRT_SECURE_NO_WARNINGS','/I'+str(REPO/'src/plugin'),'/I'+str(REPO/'third_party/enet/enet/include'),'/I'+str(REPO/'third_party/vc10_compat'),'/Fo'+str(obj),'/TC' if source.suffix=='.c' else '/EHsc',source])
++  exe=directory/'NetLinkQA.exe'
++  run(['link.exe','/nologo','/MACHINE:X64','/SUBSYSTEM:CONSOLE','/OUT:'+str(exe),*objects,'ws2_32.lib','winmm.lib','user32.lib'])
++ print(exe)
++if __name__=='__main__':main()
+diff --git a/scripts/porthole/netlink_node.cpp b/scripts/porthole/netlink_node.cpp
+new file mode 100644
+index 0000000..15f8133
+--- /dev/null
++++ b/scripts/porthole/netlink_node.cpp
+@@ -0,0 +1,57 @@
++// QA executable: actual NetLink, SteamP2P (inactive), CoopLog and SaveXfer.
++// The sole engine adapter supplies a caller-owned generated-save directory.
++#include "net/NetLink.h"
++#include "sync/SaveXfer.h"
++#include "CoopLog.h"
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <algorithm>
++static std::string saveRoot;
++namespace coop { namespace engine {
++bool saveInfo(char* game,unsigned gl,char* path,unsigned pl){
++ if(game&&gl)game[0]=0;if(path&&pl)_snprintf(path,pl,"%s",saveRoot.c_str());return true;
++}
++} }
++int main(int argc,char** argv){
++ if(argc!=6)return 2;bool host=strcmp(argv[1],"host")==0;int port=atoi(argv[2]);unsigned duration=atoi(argv[5]);
++ saveRoot=std::string(argv[3])+"\\save";CreateDirectoryA(saveRoot.c_str(),0);
++ coop::logInit((std::string(argv[3])+"\\net.log").c_str(),host?"HOST":"JOIN");
++ coop::Inbound inbound;coop::NetLink net;
++ if(!(host?net.startHost(port,&inbound):net.startClient("127.0.0.1",port,&inbound)))return 3;
++ DWORD start=GetTickCount(),connected=0,lastPublish=0,lastControl=0,ackAt=0;
++ unsigned motions=0,controls=0,maxMotionGap=0,lastMotion=0,maxControlLatency=0;
++ unsigned commit=0,ack=0,controlSeq=0,lastRemoteSeq=0;bool began=false;
++ while(GetTickCount()-start<duration){DWORD now=GetTickCount();
++  std::deque<coop::u32> peers;inbound.drainConnects(peers);if(!peers.empty()&&!connected)connected=now;
++  if(!host&&net.localId()&&!connected)connected=now;
++  if(connected&&now-lastPublish>=50){lastPublish=now;coop::EntityState rows[17];memset(rows,0,sizeof(rows));
++   for(unsigned i=0;i<17;++i){rows[i].hType=1;rows[i].hIndex=i+1;rows[i].hSerial=123+i;rows[i].x=float((now-start)/50);rows[i].cMoving=1;rows[i].cSpeed=4;}
++   net.setOwnedEntities(net.localId(),rows,17);
++  }
++  if(connected&&now-lastControl>=200){lastControl=now;coop::EventPacket e={0};e.type=coop::PKT_EVENT;e.ownerId=net.localId();e.eventId=++controlSeq;e.sSerial=now;net.queueEvent(e);}
++  if(host&&connected&&!began&&now-connected>=500){began=coop::savexfer::beginSend(net,0,"generated");}
++  if(host&&began)coop::savexfer::tickSend(net,0);
++  std::deque<coop::InboundEntity> entities;inbound.drainEntities(entities);
++  for(size_t i=0;i<entities.size();++i)if(entities[i].e.hIndex==1&&unsigned(entities[i].e.x)>lastRemoteSeq){
++   lastRemoteSeq=unsigned(entities[i].e.x);++motions;if(lastMotion)maxMotionGap=(std::max)(maxMotionGap,unsigned(now-lastMotion));lastMotion=now;
++  }
++  std::deque<coop::InboundEvent> events;inbound.drainEvents(events);
++  for(size_t i=0;i<events.size();++i){++controls;maxControlLatency=(std::max)(maxControlLatency,unsigned(now-events[i].ev.sSerial));}
++  std::deque<coop::InboundSaveEvent> saves;inbound.drainSaveBatch(saves);
++  for(size_t i=0;i<saves.size();++i){const coop::InboundSaveEvent& e=saves[i];
++   if(e.type==coop::PKT_SAVE_BEGIN)coop::savexfer::onSaveBegin(e.begin.pkt);
++   else if(e.type==coop::PKT_SAVE_FILE)coop::savexfer::onSaveFile(e.file.hdr,e.file.path.c_str(),e.file.data.empty()?0:&e.file.data[0]);
++   else if(e.type==coop::PKT_SAVE_DONE){coop::u16 files=0;unsigned __int64 bytes=0;int ok=coop::savexfer::onSaveDone(e.done.hdr,e.done.crcs.empty()?0:&e.done.crcs[0],&files,&bytes);
++    coop::SaveAckPacket a={0};a.type=coop::PKT_SAVE_ACK;a.ownerId=net.localId();a.xferId=e.done.hdr.xferId;a.ok=ok?1:0;a.files=files;a.bytes=bytes;net.queueSaveAck(a);commit=ok?1:2;ackAt=now;
++   }
++  }
++  std::deque<coop::InboundSaveAck> acks;inbound.drainSaveAcks(acks);
++  for(size_t i=0;i<acks.size();++i){ack=acks[i].pkt.ok?1:2;ackAt=now;}
++  if(ackAt&&now-ackAt>2000)break;
++  Sleep(5);
++ }
++ net.stop();coop::logClose();
++ std::ofstream report(argv[4]);report<<"{\"side\":\""<<(host?"host":"join")<<"\",\"connected\":"<<(connected?1:0)<<",\"motions\":"<<motions<<",\"controls\":"<<controls<<",\"max_motion_gap_ms\":"<<maxMotionGap<<",\"max_control_latency_ms\":"<<maxControlLatency<<",\"commit\":"<<commit<<",\"ack\":"<<ack<<",\"fingerprint\":"<<coop::savexfer::folderFingerprint("generated")<<",\"elapsed_ms\":"<<GetTickCount()-start<<"}";
++ return 0;
++}
+diff --git a/scripts/porthole/test_netlink_relay.py b/scripts/porthole/test_netlink_relay.py
+new file mode 100644
+index 0000000..3c68016
+--- /dev/null
++++ b/scripts/porthole/test_netlink_relay.py
+@@ -0,0 +1,75 @@
++from pathlib import Path
++import argparse,concurrent.futures,hashlib,heapq,json,os,random,select,socket,subprocess,threading,time
++HERE=Path(__file__).resolve().parent
++EXE=None
++class Relay:
++ def __init__(self,target,mtu,delay,jitter,loss,bps):
++  self.front=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);self.front.bind(('127.0.0.1',0))
++  self.back=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);self.back.bind(('127.0.0.1',0))
++  for s in (self.front,self.back):
++   if os.name=='nt':
++    try:s.ioctl(0x9800000C,False)
++    except (ValueError,OSError):pass
++  self.target=target;self.client=None;self.mtu=mtu;self.delay=delay;self.jitter=jitter;self.loss=loss;self.bps=bps
++  self.rng=random.Random(73421);self.next=[0.,0.];self.q=[];self.seq=0;self.stop=threading.Event()
++  self.stats={'seen':0,'forwarded':0,'mtu_dropped':0,'loss_dropped':0,'queue_dropped':0,'max_datagram':0,'max_forwarded_datagram':0,'max_queued_packets':0}
++  self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
++ def run(self):
++  while not self.stop.is_set():
++   ready,_,_=select.select([self.front,self.back],[],[],.002)
++   for sock in ready:
++    try:data,addr=sock.recvfrom(65535)
++    except ConnectionResetError:continue  # ICMP while a fresh host binds/exits.
++    direction=0 if sock is self.front else 1
++    if direction==0:self.client=addr
++    if direction==1 and not self.client:continue
++    s=self.stats;s['seen']+=1;s['max_datagram']=max(s['max_datagram'],len(data))
++    if len(data)>self.mtu:s['mtu_dropped']+=1;continue
++    if self.rng.random()<self.loss:s['loss_dropped']+=1;continue
++    now=time.monotonic();due=now+(self.delay+self.rng.uniform(-self.jitter,self.jitter))/1000
++    if self.bps:
++     due=max(due,self.next[direction])
++     if due-now>1.:s['queue_dropped']+=1;continue
++     self.next[direction]=due+len(data)/self.bps
++    self.seq+=1;heapq.heappush(self.q,(due,self.seq,direction,data));s['max_queued_packets']=max(s['max_queued_packets'],len(self.q))
++   now=time.monotonic()
++   while self.q and self.q[0][0]<=now:
++    _,_,direction,data=heapq.heappop(self.q)
++    if direction==0:self.back.sendto(data,self.target)
++    elif self.client:self.front.sendto(data,self.client)
++    self.stats['forwarded']+=1;self.stats['max_forwarded_datagram']=max(self.stats['max_forwarded_datagram'],len(data))
++ def close(self):self.stop.set();self.thread.join();self.front.close();self.back.close()
++def free_port():
++ with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
++def tree(p):return {str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file()}
++def case(out,name,profile,mtu,delay=0,jitter=0,loss=0,bps=0,duration=30000):
++ directory=out/name;directory.mkdir();host=directory/'host';join=directory/'join';host.mkdir();join.mkdir()
++ save=host/'save/generated';save.mkdir(parents=True)
++ # Real SaveXfer sends generated files only; no game saves/assets are read.
++ rng=random.Random(6543);(save/'quick.save').write_bytes(rng.randbytes(3*1024*1024));(save/'coop_squads.dat').write_bytes(b'generated metadata');(save/'empty.dat').write_bytes(b'')
++ env=os.environ.copy();env.pop('KENSHICOOP_NETWORK_PROFILE',None)
++ if profile:env['KENSHICOOP_NETWORK_PROFILE']=profile
++ port=free_port();relay=Relay(('127.0.0.1',port),mtu,delay,jitter,loss,bps);exe=EXE;processes=[];streams=[]
++ try:
++  for side,path,target in [('host',host,port),('join',join,relay.front.getsockname()[1])]:
++   f=(directory/(side+'.stdout')).open('w');streams.append(f)
++   processes.append(subprocess.Popen([str(exe),side,str(target),str(path),str(directory/(side+'.json')),str(duration)],env=env,stdout=f,stderr=subprocess.STDOUT))
++   if side=='host':time.sleep(.15)
++  for p in processes:assert p.wait(timeout=duration/1000+8)==0
++ finally:
++  for p in processes:
++   if p.poll() is None:p.kill();p.wait()
++  relay.close()
++  for f in streams:f.close()
++ result={'name':name,'profile':profile or 'baseline-udp','relay':{'mtu':mtu,'delay_ms':delay,'jitter_ms':jitter,'loss':loss,'bytes_per_sec':bps,**relay.stats},'host':json.loads((directory/'host.json').read_text()),'join':json.loads((directory/'join.json').read_text())}
++ result['byte_identical_save']=tree(host/'save/generated')==tree(join/'save/generated')
++ result['transport_pass']=all(result[s]['connected'] and result[s]['motions']>=25 and result[s]['controls']>=10 and result[s]['max_motion_gap_ms']<3000 and result[s]['max_control_latency_ms']<3000 for s in ('host','join')) and result['host']['ack']==1 and result['join']['commit']==1 and result['byte_identical_save']
++ result['RESULT']='PASS' if (not result['transport_pass'] and relay.stats['mtu_dropped']>0 if name=='baseline-mtu-blackhole' else result['transport_pass']) else 'FAIL'
++ (directory/'verdict.json').write_text(json.dumps(result,indent=2)+'\n');return result
++def main():
++ p=argparse.ArgumentParser();p.add_argument('output',type=Path);p.add_argument('--exe',type=Path,required=True);args=p.parse_args();global EXE;EXE=args.exe.resolve();assert EXE.is_file();assert not args.output.exists();args.output.mkdir(parents=True)
++ tests=[('baseline-normal',None,1400,0,0,0,0,25000),('baseline-mtu-blackhole',None,1200,0,0,0,0,8000),('porthole-mtu-blackhole','porthole',1200,0,0,0,0,25000),('porthole-bounded-lossy','porthole',1200,25,15,.01,384*1024,35000)]
++ with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:results=list(pool.map(lambda c:case(args.output,*c),tests))
++ verdict={'RESULT':'PASS' if all(r['RESULT']=='PASS' for r in results) else 'FAIL','scope':'Actual standalone NetLink/ENet/SaveXfer sender+receiver; generated saves; local relay model only, not actual Porthole or WAN','cases':results,'source_sha256':hashlib.sha256((HERE.parents[1]/'src/plugin/net/NetLink.cpp').read_bytes()).hexdigest()}
++ (args.output/'verdict.json').write_text(json.dumps(verdict,indent=2)+'\n');print(json.dumps(verdict,indent=2));return 0 if verdict['RESULT']=='PASS' else 1
++if __name__=='__main__':raise SystemExit(main())
 diff --git a/scripts/test_empty_container.py b/scripts/test_empty_container.py
 new file mode 100644
 index 0000000..25efcb7

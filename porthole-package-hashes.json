@@ -1,0 +1,42 @@
+{
+  "KenshiCoop-Setup-Host.exe": {
+    "sha256": "1b6e35df5bb604a291b34c4c70c2acf8ec77a9c47022caa7f9017aca8a85ccda",
+    "bytes": 81920
+  },
+  "KenshiCoop-Setup-Guest.exe": {
+    "sha256": "1b6e35df5bb604a291b34c4c70c2acf8ec77a9c47022caa7f9017aca8a85ccda",
+    "bytes": 81920
+  },
+  "INSTALL-RU.md": {
+    "sha256": "02eb5e37b205c6788834900d0b75fc1712549a1cefe238aae7b740a38b6481fa",
+    "bytes": 18478
+  },
+  "KenshiCoop-installer-source.zip": {
+    "sha256": "73252c97e1ff5b21446bfb983621f7dd7404c588b71460e2ff5d924cd65bb733",
+    "bytes": 45340
+  },
+  "KenshiCoop-private-squads.zip": {
+    "sha256": "5b1e4ebd54b5dcd0bc5b1a8d3c8097c1f57f36e3f2e6dc94487166559ad2e185",
+    "bytes": 4110559
+  },
+  "KenshiCoop-private-squads-source.zip": {
+    "sha256": "fa76a01103323ca529fd871cc74cf66442be510c5aab7ce20a6c8a0917a0cd4c",
+    "bytes": 3710403
+  },
+  "kenshi-private-squads.patch": {
+    "sha256": "39525021d02b125c04c145c11e4ae4cbda6e5625bbbcedc480bc987e25fc6f5c",
+    "bytes": 166721
+  },
+  "porthole-test-results.json": {
+    "sha256": "45087ed517d5bc57ec3d2044caae7f323980b754ccdf6721a833d3dee66d4bca",
+    "bytes": 70833
+  },
+  "installer-test-results.json": {
+    "sha256": "5cf367047831c3300fdec677ba0463dd23e8ea7dc8efd16e2d1b655659c7ebf5",
+    "bytes": 7368
+  },
+  "transport-test-results.json": {
+    "sha256": "05cc3ed48d98e565a4b19994bc2c7b44af7d5da3044211456aaf5a66a4dffc31",
+    "bytes": 16511
+  }
+}
