@@ -1,0 +1,2607 @@
+diff --git a/src/netproto/Wire.h b/src/netproto/Wire.h
+index 2e293ce..e034139 100644
+--- a/src/netproto/Wire.h
++++ b/src/netproto/Wire.h
+@@ -25,7 +25,7 @@ typedef double         f64;
+ // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
+ // matching entry at the bottom of that doc. The version is checked at handshake
+ // and a mismatch is rejected (no back-compat).
+-const u16 PROTOCOL_VERSION = 55;
++const u16 PROTOCOL_VERSION = 56;
+ 
+ // Packet type tags (first byte of every packet).
+ enum PacketType {
+@@ -991,6 +991,8 @@ struct MoneyPacket {
+     u32 ownerId; // network player id of the sender (the host)
+     u32 ackSeq;  // highest MoneyDeltaPacket.seq folded into this total (0 = none)
+     int money;   // the authoritative shared pool
++    u8 mode;     // 0 shared, 1 separate host/guest wallets (v56)
++    u32 epoch;   // separate-wallet world generation; zero for shared mode
+ };
+ 
+ // Join -> host: one signed change the join's LOCAL economy already applied
+@@ -1003,6 +1005,7 @@ struct MoneyDeltaPacket {
+     u32 ownerId; // network player id of the sender (the join)
+     u32 seq;     // monotonic per-session delta sequence (starts at 1)
+     int delta;   // signed change to the pool (negative = spent)
++    u32 epoch;   // must match the separate-wallet snapshot; zero for shared
+ };
+ 
+ // ---- Protocol 24: player-faction relation row --------------------------------
+diff --git a/src/plugin/Plugin.cpp b/src/plugin/Plugin.cpp
+index 109dcd4..f8e6253 100644
+--- a/src/plugin/Plugin.cpp
++++ b/src/plugin/Plugin.cpp
+@@ -25,6 +25,7 @@
+ #include <cstdio>
+ #include <string>
+ #include <deque>
++#include <set>
+ 
+ #include "CoopLog.h"
+ #include "core/Config.h"
+@@ -35,10 +36,13 @@
+ #include "net/SteamP2P.h"
+ #include "net/SteamInvite.h"
+ #include "game/Engine.h"
++#include "game/PrivateRecruit.h"
+ #include "game/EngineUi.h"       // Phase 5a: F2 co-op panel + status overlay
+ #include "game/EngineScenario.h" // Phase 5a: auto-bake scene builders
+ #include "sync/Replicator.h"
+ #include "sync/SaveXfer.h"
++#include "sync/SeparateWalletSession.h"
++#include "sync/PrivateSquadSession.h"
+ #ifdef KENSHICOOP_HARNESS
+ #include "test/Scenario.h" // scenario runner: Harness/Debug builds only (Phase 1)
+ #endif
+@@ -62,6 +66,10 @@ coop::Config&     g_cfg     = g_host.cfg;
+ coop::NetLink&    g_net     = g_host.net;
+ coop::Inbound&    g_inbound = g_host.inbound;
+ coop::Replicator& g_repl    = g_host.repl;
++coop::SeparateWalletSession g_privateWallet;
++coop::PrivateSquadSession g_privateSquadSession;
++bool g_walletModeChecked = false;
++std::deque<std::string> g_privateSaveRequests;
+ coop::u32        g_tick = 0;
+ 
+ // Last GameWorld seen by the main-loop hook. The F2-panel UI callbacks
+@@ -77,6 +85,10 @@ GameWorld*       g_lastGw = 0;
+ static int coopInvOwnerClass(const unsigned int h[5]) {
+     return g_repl.ownerClassForHand(h);
+ }
++bool g_privateSquads = true;
++static int coopRouteRecruit(Character* c) {
++    return coop::privateRecruit::route(g_lastGw,c,&coopInvOwnerClass);
++}
+ 
+ // assault_mint's victim query (ScenarioContext::pickMintedProxy). Same shape and
+ // same reason as the classifier above: the scenario layer must not know about the
+@@ -104,6 +116,7 @@ struct SessionController {
+     bool         autoLoadDone;     // title auto-load fired (settle gate)
+     DWORD        titleFirstTick;   // first title tick (settle gate base)
+     bool         peerPresent;      // a peer is connected right now
++    std::set<coop::u32> peerIds; // temporary old/new socket overlap during reconnect
+     // Coordinated save (protocol 31).
+     std::string  savePending;      // host: save name awaiting quiescence
+     coop::u32    saveReqId;        // join: monotonic PKT_SAVE_REQ counter
+@@ -241,6 +254,7 @@ void warnIfNoPortraits(const std::string& name) {
+ // into the next save. Falls back to a plain map reset if no world has ticked yet.
+ void sessionResetForUi() {
+     g_peerPresent = false;
++    g_session.peerIds.clear();
+     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
+     else          g_repl.resetSession();
+     g_inbound.flushWorldState();
+@@ -253,6 +267,12 @@ void sessionResetForUi() {
+ // OWN reload edge, and the synchronous-swap backstop reuses it, so the reset
+ // order (repl maps, then inbound queues) is defined in exactly one place.
+ void sessionResetForWorldReload() {
++    coop::engine::privateSquadsTick(0,false);
++    coop::engine::clearPeerSquadAliases();
++    g_privateSquadSession.resetWorld();
++    g_privateSaveRequests.clear();
++    g_privateWallet.resetWorld(g_cfg.isHost);
++    g_walletModeChecked = false;
+     g_repl.resetSession();
+     g_inbound.flushWorldState();
+     g_net.bumpSessionEpoch(); // v44: post-reload batches supersede the old session
+@@ -265,6 +285,35 @@ void sessionResetForWorldReload() {
+ // the host is already in-game (processNetEvents), or the host's gameplay
+ // starting with a peer already connected (mainLoop_hook gameplay-start edge).
+ // Host + saveSync + in-game are the caller's responsibility.
++bool privateWalletMode() {
++    if (!g_walletModeChecked) {
++        const char* requested=getenv("KENSHICOOP_SEPARATE_MONEY");
++        g_cfg.separateMoney=requested && strcmp(requested,"1")==0;
++        char name[64]={0};coop::engine::saveInfo(name,sizeof(name),0,0);
++        if (name[0]) {
++            std::string sidecar=coop::savexfer::saveFolderFor(name)+"\\coop_wallets.dat";
++            if(GetFileAttributesA(sidecar.c_str())!=INVALID_FILE_ATTRIBUTES)g_cfg.separateMoney=true;
++        }
++        g_walletModeChecked=true;
++        g_repl.setMoneySync(g_cfg.moneySync && !g_cfg.separateMoney);
++    }
++    return g_cfg.separateMoney;
++}
++void capturePrivateWalletBeforeSave(const char* name) {
++    if(g_cfg.isHost && g_lastGw && g_privateSquads) {
++        // A connect bootstrap can save before the first normal census tick.
++        bool ready=true;
++        if(!g_privateSquadSession.restored()) {
++            char loaded[64]={0};coop::engine::saveInfo(loaded,sizeof(loaded),0,0);
++            ready=g_privateSquadSession.restore(g_lastGw,g_repl,loaded,true);
++        }
++        if(ready)g_repl.publishOwned(g_lastGw,g_net,g_net.localId());
++        if(!ready || !g_privateSquadSession.capture(g_lastGw,g_repl,name&&*name?name:"coopresume"))
++            coopErr("[private-squads] ERROR ownership snapshot unavailable; transfer will wait");
++    }
++    if(g_cfg.isHost && g_lastGw && privateWalletMode())
++        g_privateWallet.capture(g_lastGw,name&&*name?name:"coopresume");
++}
+ void armConnectPush() {
+     char cur[64];
+     cur[0] = '\0';
+@@ -285,6 +334,7 @@ void armConnectPush() {
+ // reached the game thread cleanly (and is where later stages spawn/sweep).
+ void processNetEvents(GameWorld* gw) {
+     std::deque<coop::u32> conns, leaves;
++    bool lastPeerLeft = false;
+     g_inbound.drainConnects(conns);
+     g_inbound.drainLeaves(leaves);
+     for (std::deque<coop::u32>::iterator it = conns.begin(); it != conns.end(); ++it) {
+@@ -299,6 +349,7 @@ void processNetEvents(GameWorld* gw) {
+         // per-channel safety resends (or never minting a pre-connect build).
+         if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
+         else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
++        g_session.peerIds.insert(*it);
+         g_peerPresent = true;
+         // Coordinated save (protocol 31): while connected under save-sync,
+         // the JOIN never writes a save locally - the host's save is
+@@ -319,11 +370,18 @@ void processNetEvents(GameWorld* gw) {
+         _snprintf(b, sizeof(b) - 1, "handshake: peer left id=%u", (unsigned)*it);
+         b[sizeof(b) - 1] = '\0';
+         coopLog(b);
++        // Reconnect can admit a new socket before the old one times out. A leave
++        // for that old id must not tear down the replacement's shared session.
++        // JOIN's NetLink reports OWNER_ID_ALL for its sole host (connect id 0).
++        coop::u32 leaving = (!g_cfg.isHost && *it == coop::OWNER_ID_ALL) ? 0 : *it;
++        if (g_session.peerIds.erase(leaving) == 0) continue;
++        g_peerPresent = !g_session.peerIds.empty();
++        if (g_peerPresent) continue;
++        lastPeerLeft = true;
+         // Carried-body sync (protocol 18) + furniture occupancy (protocol 19):
+         // the departed peer's stream will never author its drop/exit edges -
+         // release any carry or occupancy its driven copies still hold.
+         if (gw && (g_cfg.carrySync || g_cfg.furnSync)) g_repl.sweepCarries(gw);
+-        g_peerPresent = false;
+         // Coordinated save: disconnected = solo again; local saves must work.
+         if (!g_cfg.isHost && g_cfg.saveSync) {
+             coop::engine::setSaveSuppress(false);
+@@ -335,8 +393,9 @@ void processNetEvents(GameWorld* gw) {
+     // (the engine will eventually reap them, and the next drive touches a freed
+     // pointer - the "join crash -> host follow-on crash" chain). Despawn the
+     // minted proxies and clear the peer maps, mirroring coopUiDisconnect(). Runs
+-    // once per leave batch (we support a single peer).
+-    if (!leaves.empty()) {
++    // once when the final tracked socket leaves (one logical peer; reconnect
++    // can briefly have both its old and replacement sockets registered).
++    if (lastPeerLeft) {
+         g_repl.clearPeerReplicationState(gw);
+         g_inbound.flushWorldState();
+     }
+@@ -350,33 +409,32 @@ void processNetEvents(GameWorld* gw) {
+ // being copy-pasted into both. Emits no log line, so the oracle log contract is
+ // unaffected by the extraction.
+ void pumpSaveReceive() {
+-    std::deque<coop::InboundSaveBegin> begins;
+-    g_inbound.drainSaveBegins(begins);
+-    for (std::deque<coop::InboundSaveBegin>::iterator it = begins.begin();
+-         it != begins.end(); ++it)
+-        coop::savexfer::onSaveBegin(it->pkt);
+-
+-    std::deque<coop::InboundSaveFile> chunks;
+-    g_inbound.drainSaveFiles(chunks);
+-    for (std::deque<coop::InboundSaveFile>::iterator it = chunks.begin();
+-         it != chunks.end(); ++it)
+-        coop::savexfer::onSaveFile(it->hdr, it->path.c_str(),
+-                                   it->data.empty() ? 0 : &it->data[0]);
+-
+-    std::deque<coop::InboundSaveDone> dones;
+-    g_inbound.drainSaveDones(dones);
+-    for (std::deque<coop::InboundSaveDone>::iterator it = dones.begin();
+-         it != dones.end(); ++it) {
++    std::deque<coop::InboundSaveEvent> events;
++    g_inbound.drainSaveBatch(events);
++    for (std::deque<coop::InboundSaveEvent>::iterator it = events.begin();
++         it != events.end(); ++it) {
++        if (it->type == coop::PKT_SAVE_BEGIN) {
++            coop::savexfer::onSaveBegin(it->begin.pkt);
++            continue;
++        }
++        if (it->type == coop::PKT_SAVE_FILE) {
++            const coop::InboundSaveFile& chunk = it->file;
++            coop::savexfer::onSaveFile(chunk.hdr, chunk.path.c_str(),
++                                       chunk.data.empty() ? 0 : &chunk.data[0]);
++            continue;
++        }
++        if (it->type != coop::PKT_SAVE_DONE) continue;
++        const coop::InboundSaveDone& done = it->done;
+         coop::u16 files = 0;
+         unsigned __int64 bytes = 0;
+-        int ok = coop::savexfer::onSaveDone(it->hdr,
+-                                            it->crcs.empty() ? 0 : &it->crcs[0],
++        int ok = coop::savexfer::onSaveDone(done.hdr,
++                                            done.crcs.empty() ? 0 : &done.crcs[0],
+                                             &files, &bytes);
+         coop::SaveAckPacket ack;
+         memset(&ack, 0, sizeof(ack));
+         ack.type    = (coop::u8)coop::PKT_SAVE_ACK;
+         ack.ownerId = g_net.localId();
+-        ack.xferId  = it->hdr.xferId;
++        ack.xferId  = done.hdr.xferId;
+         ack.ok      = ok ? 1 : 0;
+         ack.files   = files;
+         ack.bytes   = bytes;
+@@ -407,6 +465,15 @@ void driveSaveSync() {
+             g_savePending = name;
+             coop::savexfer::armWatch(name);
+         } else if (edges[i].suppressed && !edges[i].autosave) {
++            g_privateSaveRequests.push_back(name);
++        }
++    }
++    // SAVE_REQ uses the bulk channel, while wallet deltas use the reliable
++    // channel. Wait for the host's ACK before requesting the save; otherwise
++    // the request can overtake a purchase and persist the old guest balance.
++    if (!g_cfg.isHost && (!privateWalletMode() || g_privateWallet.readyForSave())) {
++        while (!g_privateSaveRequests.empty()) {
++            std::string name=g_privateSaveRequests.front();g_privateSaveRequests.pop_front();
+             coop::SaveReqPacket rq;
+             memset(&rq, 0, sizeof(rq));
+             rq.type    = (coop::u8)coop::PKT_SAVE_REQ;
+@@ -447,6 +514,16 @@ void driveSaveSync() {
+             unsigned long waited = 0;
+             int rc = coop::savexfer::tickWatch(&files, &bytes, &waited);
+             if (rc == 1 || rc == 2) {
++                if(g_privateSquads && !g_privateSquadSession.save(g_savePending)) {
++                    coopErr("[private-squads] ERROR ownership snapshot write failed; save transfer blocked");
++                    coop::savexfer::armWatch(g_savePending);
++                    return;
++                }
++                if (g_cfg.separateMoney && !g_privateWallet.save(g_savePending)) {
++                    coopErr("[wallet-private] ERROR wallet snapshot write failed; save transfer blocked");
++                    coop::savexfer::armWatch(g_savePending); // retry; never ship stale ledger
++                    return;
++                }
+                 char b[176];
+                 _snprintf(b, sizeof(b) - 1,
+                           "[save] QUIESCED kind=%s name='%s' files=%u bytes=%I64u waitMs=%lu",
+@@ -1068,8 +1145,18 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
+         // the peer that drives that body must honour it).
+         g_repl.applyEvents(gw, g_inbound);
+     }
+-    if (worldLive) {
++    bool privateOwnersReady=true;
++    if(worldLive && g_privateSquads && !g_privateSquadSession.restored()) {
++        char loaded[64]={0};coop::engine::saveInfo(loaded,sizeof(loaded),0,0);
++        privateOwnersReady=g_privateSquadSession.restore(gw,g_repl,loaded,g_cfg.isHost);
++        if(g_privateSquadSession.blocked()) {
++            static bool reported=false;
++            if(!reported){reported=true;coopErr("[private-squads] ERROR invalid ownership sidecar; ownership publication blocked");}
++        }
++    }
++    if (worldLive && privateOwnersReady) {
+         g_repl.publishOwned(gw, g_net, g_net.localId());
++        coop::engine::privateSquadsTick(gw,g_privateSquads);
+         // Phase W2: BOTH clients watch their OWNED characters for a WEAPON drop and author a
+         // reliable conservation intent so the peer relocates its own copy of that weapon (a
+         // weapon can't be rebuilt via the W1 proxy path). Bidirectional; gated on worldSync.
+@@ -1148,7 +1235,9 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
+         // delta, host: the authoritative total); apply folds deltas / adopts the
+         // total. Ordered after publishOwned so isHostRole() reflects this tick's
+         // ownership partition.
+-        if (g_cfg.moneySync) {
++        if (privateWalletMode()) {
++            g_privateWallet.tick(gw,g_inbound,g_net,g_net.localId(),g_cfg.isHost);
++        } else if (g_cfg.moneySync) {
+             g_repl.publishMoneyPool(replCtx(gw));
+             g_repl.applyMoneyPool(replCtx(gw));
+         }
+@@ -1651,6 +1740,7 @@ void mainLoop_hook(GameWorld* gw, float dt) {
+     // yet). driveLoadSync itself is NOT gated on this - it only touches net
+     // packets + file IO + loadSave, never cached world pointers.
+     const bool worldLive = g_gameStarted && coop::engine::gameplayLive(gw);
++    if(!worldLive)coop::engine::privateSquadsTick(0,false);
+ 
+     // Build capture runs inside an engine factory call, not on our tick, so it
+     // needs worldLive handed to it: a world load creates every building in the
+@@ -2043,7 +2133,8 @@ void configureReplicator() {
+     // Shared money pool (protocol 52, default ON): one host-authoritative purse
+     // both players spend from. KENSHICOOP_MONEY_SYNC=0 is the A/B escape hatch
+     // (and the shop_probe baseline).
+-    g_repl.setMoneySync(g_cfg.moneySync);
++    g_repl.setMoneySync(g_cfg.moneySync && !g_cfg.separateMoney);
++    coop::engine::setBeforeSaveObserver(&capturePrivateWalletBeforeSave);
+ 
+     // Runtime-spawn proxy replication (protocol 21, default ON): the join mints
+     // local proxy bodies for host runtime spawns it cannot resolve by hand.
+@@ -2209,9 +2300,14 @@ void installEngineDetours() {
+     // census-author (host-authoritative world containers). Layered on invSync
+     // (publishInventories is the carrier and is gated on it below).
+     g_repl.setStoreSync(g_cfg.storeSync && g_cfg.isHost);
+-    if (g_cfg.recruitSync) {
++    const char* privateSetting=getenv("KENSHICOOP_PRIVATE_SQUADS");
++    g_privateSquads=!privateSetting || strcmp(privateSetting,"0")!=0;
++    coop::engine::setRecruitRouter(g_privateSquads?&coopRouteRecruit:0);
++    if(g_privateSquads)
++        coop::engine::installPrivateSquadUiHooks(&coopInvOwnerClass);
++    if (g_cfg.recruitSync || g_privateSquads) {
+         if (coop::engine::installRecruitHook())
+-            coopLog("[recruit] recruit detour installed; recruitment sync ON");
++            coopLog(g_cfg.recruitSync?"[recruit] recruit detour installed; recruitment sync ON":"[recruit] recruit detour installed; local private routing ON");
+         else
+             coopLog("[recruit] FAILED to install recruit detour; recruitment sync degraded (no local-edge detection)");
+     }
+diff --git a/src/plugin/core/Config.cpp b/src/plugin/core/Config.cpp
+index d7e7df9..15620b8 100644
+--- a/src/plugin/core/Config.cpp
++++ b/src/plugin/core/Config.cpp
+@@ -221,6 +221,7 @@ void loadConfig(Config& c) {
+     c.stealthSync = envOr("KENSHICOOP_STEALTH_SYNC", "1") != "0";
+     c.proneSync   = envOr("KENSHICOOP_PRONE_SYNC", "1") != "0";
+     c.moneySync   = envOr("KENSHICOOP_MONEY_SYNC", "1") != "0";
++    c.separateMoney = envOr("KENSHICOOP_SEPARATE_MONEY", "0") == "1";
+     c.spawnSync   = envOr("KENSHICOOP_SPAWN_SYNC", "1") != "0";
+     c.recruitSync = envOr("KENSHICOOP_RECRUIT_SYNC", "1") != "0";
+     c.factionSync = envOr("KENSHICOOP_FACTION_SYNC", "1") != "0";
+diff --git a/src/plugin/core/Config.h b/src/plugin/core/Config.h
+index c9383b1..f606c09 100644
+--- a/src/plugin/core/Config.h
++++ b/src/plugin/core/Config.h
+@@ -371,6 +371,7 @@ struct Config {
+     // join's economy is erased by the next save (the host's wallet is the one
+     // that persists). "0" is the A/B escape hatch.
+     bool          moneySync;
++    bool          separateMoney; // KENSHICOOP_SEPARATE_MONEY=1; fixed host/guest slots
+ 
+     // KENSHICOOP_SPAWN_SYNC (default ON): runtime-spawn proxy replication
+     // (protocol 21) - the join requests a description (PKT_SPAWN_REQ) for any
+diff --git a/src/plugin/core/Inbound.h b/src/plugin/core/Inbound.h
+index 7cc9bf3..e0dc749 100644
+--- a/src/plugin/core/Inbound.h
++++ b/src/plugin/core/Inbound.h
+@@ -312,6 +312,17 @@ struct InboundSaveDone {
+     std::vector<u32> crcs;
+ };
+ 
++// One ordered save-transfer stream. Splitting BEGIN/FILE/DONE into independent
++// queues let a newly-arrived DONE overtake chunks drained earlier in the frame.
++// A single session-preserving FIFO also retains boundaries between transfers.
++struct InboundSaveEvent {
++    u8 type;
++    InboundSaveBegin begin;
++    InboundSaveFile file;
++    InboundSaveDone done;
++    InboundSaveEvent() : type(0), begin(), file(), done() {}
++};
++
+ // One received commit acknowledgement (protocol 31, host side).
+ struct InboundSaveAck {
+     u32           ownerId;
+@@ -646,24 +657,27 @@ public:
+         EnterCriticalSection(&cs_); saveReq_.push_back(sr); LeaveCriticalSection(&cs_);
+     }
+     void pushSaveBegin(u32 ownerId, const SaveBeginPacket& pkt) {
+-        InboundSaveBegin sb; sb.ownerId = ownerId; sb.pkt = pkt;
+-        EnterCriticalSection(&cs_); saveBegin_.push_back(sb); LeaveCriticalSection(&cs_);
++        InboundSaveEvent ev; ev.type = (u8)PKT_SAVE_BEGIN;
++        ev.begin.ownerId = ownerId; ev.begin.pkt = pkt;
++        EnterCriticalSection(&cs_); saveEvents_.push_back(ev); LeaveCriticalSection(&cs_);
+     }
+     void pushSaveFile(u32 ownerId, const SaveFileHeader& hdr,
+                       const char* path, const u8* data) {
+-        InboundSaveFile sf;
++        InboundSaveEvent ev; ev.type = (u8)PKT_SAVE_FILE;
++        InboundSaveFile& sf = ev.file;
+         sf.ownerId = ownerId;
+         sf.hdr     = hdr;
+         sf.path.assign(path, path + hdr.pathLen);
+         if (data && hdr.dataLen > 0) sf.data.assign(data, data + hdr.dataLen);
+-        EnterCriticalSection(&cs_); saveFile_.push_back(sf); LeaveCriticalSection(&cs_);
++        EnterCriticalSection(&cs_); saveEvents_.push_back(ev); LeaveCriticalSection(&cs_);
+     }
+     void pushSaveDone(u32 ownerId, const SaveDoneHeader& hdr, const u32* crcs) {
+-        InboundSaveDone sd;
++        InboundSaveEvent ev; ev.type = (u8)PKT_SAVE_DONE;
++        InboundSaveDone& sd = ev.done;
+         sd.ownerId = ownerId;
+         sd.hdr     = hdr;
+         if (crcs && hdr.fileCount > 0) sd.crcs.assign(crcs, crcs + hdr.fileCount);
+-        EnterCriticalSection(&cs_); saveDone_.push_back(sd); LeaveCriticalSection(&cs_);
++        EnterCriticalSection(&cs_); saveEvents_.push_back(ev); LeaveCriticalSection(&cs_);
+     }
+     void pushSaveAck(u32 ownerId, const SaveAckPacket& pkt) {
+         InboundSaveAck sa; sa.ownerId = ownerId; sa.pkt = pkt;
+@@ -799,14 +813,8 @@ public:
+     void drainSaveReqs(std::deque<InboundSaveReq>& out) {
+         EnterCriticalSection(&cs_); out.swap(saveReq_); LeaveCriticalSection(&cs_);
+     }
+-    void drainSaveBegins(std::deque<InboundSaveBegin>& out) {
+-        EnterCriticalSection(&cs_); out.swap(saveBegin_); LeaveCriticalSection(&cs_);
+-    }
+-    void drainSaveFiles(std::deque<InboundSaveFile>& out) {
+-        EnterCriticalSection(&cs_); out.swap(saveFile_); LeaveCriticalSection(&cs_);
+-    }
+-    void drainSaveDones(std::deque<InboundSaveDone>& out) {
+-        EnterCriticalSection(&cs_); out.swap(saveDone_); LeaveCriticalSection(&cs_);
++    void drainSaveBatch(std::deque<InboundSaveEvent>& out) {
++        EnterCriticalSection(&cs_); out.swap(saveEvents_); LeaveCriticalSection(&cs_);
+     }
+     void drainSaveAcks(std::deque<InboundSaveAck>& out) {
+         EnterCriticalSection(&cs_); out.swap(saveAck_); LeaveCriticalSection(&cs_);
+@@ -903,9 +911,7 @@ private:
+     // SESSION-PRESERVING: coordinated save (protocol 31) + load (protocol 32)
+     // handshake - a GO/NACK/chunk arriving mid-swap must survive the reset.
+     SessionQ<InboundSaveReq>       saveReq_;
+-    SessionQ<InboundSaveBegin>     saveBegin_;
+-    SessionQ<InboundSaveFile>      saveFile_;
+-    SessionQ<InboundSaveDone>      saveDone_;
++    SessionQ<InboundSaveEvent>     saveEvents_;
+     SessionQ<InboundSaveAck>       saveAck_;
+     SessionQ<InboundLoadGo>        loadGo_;
+     SessionQ<InboundLoadReq>       loadReq_;
+diff --git a/src/plugin/game/Engine.h b/src/plugin/game/Engine.h
+index dd18c0c..abcd493 100644
+--- a/src/plugin/game/Engine.h
++++ b/src/plugin/game/Engine.h
+@@ -63,6 +63,8 @@ struct SaveEdge { char name[48]; int autosave; int suppressed; };
+ // LOCAL-SAVE" line and queues a SaveEdge the Plugin drains once per tick -
+ // the coordination trigger for the host-authoritative save transfer.
+ bool installSaveHook();
++// Main-thread observer immediately before the native save captures the world.
++void setBeforeSaveObserver(void (*observer)(const char* name));
+ // JOIN under save-sync: suppress the LOCAL write entirely (the host's save is
+ // authoritative; a manual edge is forwarded as PKT_SAVE_REQ instead).
+ void setSaveSuppress(bool on);
+@@ -1202,6 +1204,10 @@ bool recruitNpc(GameWorld* gw, Character* c);
+ // the host's kinematic drive wins. Idempotent; SEH-guarded. Returns true if the
+ // body is a player-squad member afterwards.
+ bool joinPlayerSquadAt(GameWorld* gw, Character* c, const unsigned int newHand[5]);
++// Remote canonical group -> durable native group alias; never default-squad fallback.
++bool joinPeerSquadAt(GameWorld* gw, Character* c, const unsigned int newHand[5]);
++// Actual world reload only: transport reconnect must preserve native aliases.
++void clearPeerSquadAliases();
+ 
+ // AI decision-layer suspension (the faction-safe alternative to recruit): detour
+ // Character::periodicUpdate so that, for NPCs in the suspended set, the AI "think"
+@@ -1675,6 +1681,10 @@ bool installShopHook();
+ // the peer re-keys its local copy of the old hand to the new stream key.
+ struct RecruitEdge { unsigned int before[5]; unsigned int after[5]; };
+ bool installRecruitHook();
++typedef int (*RecruitRouteFn)(Character*);
++void setRecruitRouter(RecruitRouteFn fn);
++bool installPrivateSquadUiHooks(InvOwnerClassFn owner);
++void privateSquadsTick(GameWorld* gw,bool enabled);
+ unsigned int drainRecruitEdges(RecruitEdge* out, unsigned int maxOut);
+ 
+ // ---- Protocol 24: faction-relation sync -------------------------------------
+diff --git a/src/plugin/game/EngineInternal.cpp b/src/plugin/game/EngineInternal.cpp
+index 7fe0512..db84fe9 100644
+--- a/src/plugin/game/EngineInternal.cpp
++++ b/src/plugin/game/EngineInternal.cpp
+@@ -97,6 +97,7 @@ SaveMgrExecFn g_saveMgrExecFn = 0;
+ std::vector<SaveEdgeRec> g_saveEdges;
+ bool g_saveSuppressAll = false;
+ SaveMgrSaveNameFn g_saveHookOrig = 0;
++void (*g_beforeSaveObserver)(const char*) = 0;
+ 
+ void __fastcall saveMgrSave_hook(SaveManager* self, const std::string* name,
+                                  bool autosave) {
+@@ -109,7 +110,10 @@ void __fastcall saveMgrSave_hook(SaveManager* self, const std::string* name,
+         }
+     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
+     const bool suppress = g_saveSuppressAll;
+-    if (!suppress) g_saveHookOrig(self, name, autosave);
++    if (!suppress) {
++        if (g_beforeSaveObserver) g_beforeSaveObserver(nm);
++        g_saveHookOrig(self, name, autosave);
++    }
+     __try {
+         SaveEdgeRec r;
+         memset(&r, 0, sizeof(r));
+@@ -199,6 +203,7 @@ void __fastcall saveMgrLoad_hook(SaveManager* self, const std::string* name) {
+         }
+     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
+     if (loadDetourEdge(nm, "name")) {
++        privateSquadsTick(0,false);
+         g_inLoadDetour = true;
+         g_loadHookOrig(self, name);
+         g_inLoadDetour = false;
+@@ -219,6 +224,7 @@ void __fastcall saveMgrLoadInfo_hook(SaveManager* self, const SaveInfo* info,
+         }
+     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
+     if (loadDetourEdge(nm, "menu")) {
++        privateSquadsTick(0,false);
+         g_inLoadDetour = true;
+         g_loadInfoHookOrig(self, info, resetPos);
+         g_inLoadDetour = false;
+@@ -949,19 +955,25 @@ RecruitFn g_recruitFn = 0;
+ // tick and plugin tick share the main thread, so the queue needs no lock.
+ std::vector<RecruitEdgeRec> g_recruitEdges;
+ RecruitFn g_recruitHookOrig = 0;
++RecruitRouteFn g_recruitRouter = 0;
++void setRecruitRouter(RecruitRouteFn fn){g_recruitRouter=fn;}
+ bool __fastcall recruit_hook(PlayerInterface* self, Character* c, bool editor) {
+     unsigned int hb[5] = { 0, 0, 0, 0, 0 };
+     bool haveBefore = false;
+     __try {
+-        if (c) { readObjectHand(static_cast<RootObject*>(c), hb); haveBefore = true; }
++        if (c) haveBefore=readObjectHand(static_cast<RootObject*>(c), hb);
+     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+     bool ok = g_recruitHookOrig(self, c, editor);
+     if (ok && haveBefore) {
++        if(!editor && g_recruitRouter){
++            int routed=g_recruitRouter(c);char message[96];
++            _snprintf(message,sizeof(message)-1,"[private-squads] recruit route=%d",routed);message[sizeof(message)-1]=0;logLine(message);
++        }
+         __try {
+             RecruitEdgeRec e;
+             memcpy(e.before, hb, sizeof(hb));
+             memset(e.after, 0, sizeof(e.after));
+-            readObjectHand(static_cast<RootObject*>(c), e.after);
++            if(!readObjectHand(static_cast<RootObject*>(c), e.after))return ok;
+             if (g_recruitEdges.size() < 64) g_recruitEdges.push_back(e);
+             char b[176];
+             _snprintf(b, sizeof(b) - 1,
+@@ -2096,6 +2108,7 @@ bool installSaveHook() {
+ }
+ 
+ void setSaveSuppress(bool on) { g_saveSuppressAll = on; }
++void setBeforeSaveObserver(void (*observer)(const char*)) { g_beforeSaveObserver = observer; }
+ 
+ unsigned int drainSaveEdges(SaveEdge* out, unsigned int maxOut) {
+     unsigned int n = 0;
+@@ -2280,7 +2293,7 @@ unsigned int drainRecruitEdges(RecruitEdge* out, unsigned int maxOut) {
+         memcpy(out[n].before, g_recruitEdges[i].before, sizeof(out[n].before));
+         memcpy(out[n].after,  g_recruitEdges[i].after,  sizeof(out[n].after));
+     }
+-    g_recruitEdges.clear();
++    g_recruitEdges.erase(g_recruitEdges.begin(),g_recruitEdges.begin()+n);
+     return n;
+ }
+ 
+@@ -2361,7 +2374,7 @@ unsigned int drainSquadMoveEdges(SquadMoveEdge* out, unsigned int maxOut) {
+         memcpy(out[n].before, g_squadMoveEdges[i].before, sizeof(out[n].before));
+         memcpy(out[n].after,  g_squadMoveEdges[i].after,  sizeof(out[n].after));
+     }
+-    g_squadMoveEdges.clear();
++    g_squadMoveEdges.erase(g_squadMoveEdges.begin(),g_squadMoveEdges.begin()+n);
+     return n;
+ }
+ 
+@@ -2451,3 +2464,5 @@ bool readBloodByHand(const unsigned int hand[5], float* outBlood) {
+ 
+ } // namespace engine
+ } // namespace coop
++
++#include "PrivateSquadUi.h"
+diff --git a/src/plugin/game/EngineInternal.h b/src/plugin/game/EngineInternal.h
+index 029d4bd..17038de 100644
+--- a/src/plugin/game/EngineInternal.h
++++ b/src/plugin/game/EngineInternal.h
+@@ -57,7 +57,7 @@
+ #include <kenshi/Inventory.h>       // Inventory (Phase 4a container contents)
+ #include <kenshi/Item.h>            // Item / InventoryItemBase (quantity/quality/equipped)
+ #include <kenshi/CharBody.h>        // CharBody::currentAction / _NV_setCurrentAction
+-#include <kenshi/CombatClass.h>     // CombatClass::combatState (active-vs-waiting stance)
++#include <kenshi/combat/CombatClass.h> // CombatClass::combatState (active-vs-waiting stance)
+ #include <kenshi/Damages.h>         // Damages (melee hit floats; protocol 45 join-dealt report)
+ #include <kenshi/CharStats.h>       // CharStats (protocol 17 stats sync)
+ #include <kenshi/Tasker.h>          // Tasker::key() -> TaskType, Tasker::subject (hand)
+diff --git a/src/plugin/game/EngineInventory.cpp b/src/plugin/game/EngineInventory.cpp
+index 9d136b7..4a7c9cb 100644
+--- a/src/plugin/game/EngineInventory.cpp
++++ b/src/plugin/game/EngineInventory.cpp
+@@ -955,7 +955,10 @@ bool applyContainerContents(GameWorld* gw, const unsigned int cHand[5],
+         top[nTop++] = items[i];
+     }
+     bool changed = applyToInventory(gw, inv, nTop ? top : 0, nTop, truncated);
+-    if (nNested == 0) return changed;
++    // A complete snapshot that still names a bag but has no children describes an
++    // EMPTY bag. It must reach the nested pass to remove stale contents on the peer.
++    // A truncated snapshot cannot prove emptiness: its children may simply not fit.
++    if (nTop == 0 || (nNested == 0 && truncated)) return changed;
+ 
+     // Re-read AFTER the top-level pass: it may have created or moved the very bag we are about
+     // to fill, and a bag identified from the stale read would be the wrong object (or gone).
+@@ -981,7 +984,9 @@ bool applyContainerContents(GameWorld* gw, const unsigned int cHand[5],
+         unsigned int nk = 0;
+         for (unsigned int i = 0; i < count && nk < INV_ITEMS_MAX; ++i)
+             if (items[i].parentIdx == (unsigned char)(topSrcIdx[t] + 1)) kids[nk++] = items[i];
+-        if (nk == 0) continue;
++        // Missing children are authoritative only in a complete snapshot. Skip ordinary
++        // non-container items, but reconcile a present empty bag against an empty list.
++        if (nk == 0 && (truncated || !isContainerItemType(top[t].itemType))) continue;
+         claimed += nk;
+ 
+         // Which copy of this template is it, in the SENDER's order? The sender's Nth bag of a
+diff --git a/src/plugin/game/EngineWorld.cpp b/src/plugin/game/EngineWorld.cpp
+index 03ba1db..d592f17 100644
+--- a/src/plugin/game/EngineWorld.cpp
++++ b/src/plugin/game/EngineWorld.cpp
+@@ -17,6 +17,49 @@
+ namespace coop {
+ namespace engine {
+ 
++// Peer runtime platoon IDs are not native IDs in this process. Preserve each
++// remote group as one real local platoon rather than merging unknown groups
++// into the first player squad. Handles survive transport reconnects; world
++// reload explicitly clears the cache before any old handle can be reused.
++static GameWorld* peerSquadWorld=0;
++static std::map<std::pair<unsigned int,unsigned int>,hand> peerSquadAliases;
++void clearPeerSquadAliases(){peerSquadAliases.clear();peerSquadWorld=0;}
++
++// No SEH here: map/hand objects require ordinary C++ unwinding. The public
++// native entry below supplies the SEH boundary around pointer/native access.
++static ActivePlatoon* resolvePeerSquad(GameWorld* gw,Faction* faction,const unsigned int h[5]) {
++    if(peerSquadWorld!=gw){peerSquadAliases.clear();peerSquadWorld=gw;}
++    std::pair<unsigned int,unsigned int> key(h[1],h[2]);
++    std::map<std::pair<unsigned int,unsigned int>,hand>::iterator it=peerSquadAliases.find(key);
++    if(it!=peerSquadAliases.end()){
++        ActivePlatoon* cached=it->second.getActivePlatoon();
++        if(cached&&cached->me&&cached->me->getFaction()==faction)return cached;
++        peerSquadAliases.erase(it);
++    }
++    ActivePlatoon* target=0;
++    // Include populated AND empty common-save groups. A matching native
++    // platoon is safe only when both its index and serial match the wire key.
++    for(unsigned int i=0;i<faction->activePlatoons.size();++i){
++        Platoon* p=faction->activePlatoons[i];if(!p||!p->activePlatoon||p->getFaction()!=faction)continue;
++        const hand& ph=p->getHandle();
++        if(ph.container==h[1]&&ph.containerSerial==h[2]){target=p->activePlatoon;break;}
++    }
++    if(!target)target=gw->player->createSquad();
++    if(!target||!target->me||target->me->getFaction()!=faction)return 0;
++    peerSquadAliases[key]=target->me->getHandle();
++    return target;
++}
++
++bool joinPeerSquadAt(GameWorld* gw,Character* c,const unsigned int newHand[5]) {
++    if(!gw||!gw->player||!c||!newHand||!g_playerFactionFn||!g_getPlatoonFn)return false;
++    __try {
++        Faction* faction=g_playerFactionFn(gw->player);if(!faction)return false;
++        ActivePlatoon* target=resolvePeerSquad(gw,faction,newHand);if(!target)return false;
++        if(g_getPlatoonFn(c)==target&&isPlayerSquad(gw,static_cast<RootObject*>(c)))return true;
++        c->setFaction(faction,target);return true;
++    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
++}
++
+ // ---- Money + vendor trading (protocol 52 pool) -------------------------------
+ 
+ namespace {
+diff --git a/src/plugin/net/NetLink.cpp b/src/plugin/net/NetLink.cpp
+index 2c1995b..aea5231 100644
+--- a/src/plugin/net/NetLink.cpp
++++ b/src/plugin/net/NetLink.cpp
+@@ -252,24 +252,35 @@ void NetLink::queueInvXferAck(const InvXferAckPacket& pkt) { pushLocked(outCs_,
+ 
+ void NetLink::queueSaveReq(const SaveReqPacket& pkt) { pushLocked(outCs_, outSaveReq_, pkt); }
+ 
+-void NetLink::queueSaveBegin(const SaveBeginPacket& pkt) { pushLocked(outCs_, outSaveBegin_, pkt); }
++void NetLink::queueSaveBegin(const SaveBeginPacket& pkt) {
++    OutSaveEvent ev;
++    ev.bytes.resize(sizeof(pkt));
++    std::memcpy(&ev.bytes[0], &pkt, sizeof(pkt));
++    pushLocked(outCs_, outSaveEvents_, ev);
++}
+ 
+ void NetLink::queueSaveFile(const SaveFileHeader& hdr, const char* relPath,
+                             const unsigned char* data, unsigned int dataLen) {
+-    OutSaveFile of;
+-    of.hdr = hdr;
+-    of.tail.reserve(hdr.pathLen + dataLen);
+-    of.tail.assign(relPath, relPath + hdr.pathLen);
+-    if (data && dataLen > 0) of.tail.insert(of.tail.end(), data, data + dataLen);
+-    pushLocked(outCs_, outSaveFile_, of);
++    OutSaveEvent ev;
++    unsigned int payloadBytes = data ? dataLen : 0;
++    ev.bytes.resize(sizeof(hdr) + hdr.pathLen + payloadBytes);
++    std::memcpy(&ev.bytes[0], &hdr, sizeof(hdr));
++    if (hdr.pathLen > 0)
++        std::memcpy(&ev.bytes[sizeof(hdr)], relPath, hdr.pathLen);
++    if (payloadBytes > 0)
++        std::memcpy(&ev.bytes[sizeof(hdr) + hdr.pathLen], data, payloadBytes);
++    pushLocked(outCs_, outSaveEvents_, ev);
+ }
+ 
+ void NetLink::queueSaveDone(const SaveDoneHeader& hdr, const u32* crcs,
+                             unsigned int count) {
+-    OutSaveDone od;
+-    od.hdr = hdr;
+-    if (crcs && count > 0) od.crcs.assign(crcs, crcs + count);
+-    pushLocked(outCs_, outSaveDone_, od);
++    OutSaveEvent ev;
++    unsigned int crcCount = crcs ? count : 0;
++    ev.bytes.resize(sizeof(hdr) + crcCount * sizeof(u32));
++    std::memcpy(&ev.bytes[0], &hdr, sizeof(hdr));
++    if (crcCount > 0)
++        std::memcpy(&ev.bytes[sizeof(hdr)], crcs, crcCount * sizeof(u32));
++    pushLocked(outCs_, outSaveEvents_, ev);
+ }
+ 
+ void NetLink::queueSaveAck(const SaveAckPacket& pkt) { pushLocked(outCs_, outSaveAck_, pkt); }
+@@ -400,6 +411,7 @@ void NetLink::threadLoop() {
+     }
+ 
+     u32   nextId = 1;
++    ENetPeer* moneyPeer = 0; // latest accepted guest; reject stale socket funds
+     DWORD lastConnectAttempt = GetTickCount();
+ 
+     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
+@@ -489,6 +501,7 @@ void NetLink::threadLoop() {
+                                            "not relayed peer-to-peer; expect desync");
+                                 }
+                                 ev.peer->data = (void*)(size_t)id;
++                                moneyPeer = ev.peer;
+                                 WelcomePacket w;
+                                 w.type = (u8)PKT_WELCOME; w.version = PROTOCOL_VERSION; w.playerId = id;
+                                 ENetPacket* out =
+@@ -721,15 +734,16 @@ void NetLink::threadLoop() {
+                         // (protocol 52). Delivered immediately like the others.
+                         MoneyPacket mo;
+                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &mo)
+-                            && inbound_) {
+-                            inbound_->pushMoney(mo.ownerId, mo);
++                            && inbound_ && !isHost_ && ev.peer == serverPeer_) {
++                            inbound_->pushMoney(0, mo);
+                         }
+                     } else if (type == PKT_MONEY_DELTA) {
+                         // Reliable money-pool delta (protocol 52, join -> host).
+                         // Ordered delivery is what makes the fold exactly-once.
+                         MoneyDeltaPacket md;
+                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &md)
+-                            && inbound_) {
++                            && inbound_ && isHost_ && ev.peer == moneyPeer &&
++                            md.ownerId == (u32)(size_t)ev.peer->data) {
+                             inbound_->pushMoneyDelta(md.ownerId, md);
+                         }
+                     } else if (type == PKT_FACTION) {
+@@ -1703,15 +1717,11 @@ void NetLink::threadLoop() {
+         // floods the channel - and CH_BULK keeps the megabytes off CH_RELIABLE,
+         // so a live transfer no longer stalls door/money/faction events.
+         std::vector<SaveReqPacket>   saveReqs;
+-        std::vector<SaveBeginPacket> saveBegins;
+-        std::vector<OutSaveFile>     saveFiles;
+-        std::vector<OutSaveDone>     saveDones;
++        std::vector<OutSaveEvent>    saveEvents;
+         std::vector<SaveAckPacket>   saveAcks;
+         EnterCriticalSection(&outCs_);
+         saveReqs.swap(outSaveReq_);
+-        saveBegins.swap(outSaveBegin_);
+-        saveFiles.swap(outSaveFile_);
+-        saveDones.swap(outSaveDone_);
++        saveEvents.swap(outSaveEvents_);
+         saveAcks.swap(outSaveAck_);
+         LeaveCriticalSection(&outCs_);
+         for (size_t i = 0; i < saveReqs.size(); ++i) {
+@@ -1725,8 +1735,11 @@ void NetLink::threadLoop() {
+                 enet_packet_destroy(out);
+             }
+         }
+-        for (size_t i = 0; i < saveBegins.size(); ++i) {
+-            ENetPacket* out = enet_packet_create(&saveBegins[i], sizeof(SaveBeginPacket),
++        // FIFO order is the order SaveXfer queued the stream, including a
++        // previous transfer's DONE before the next transfer's BEGIN.
++        for (size_t i = 0; i < saveEvents.size(); ++i) {
++            const std::vector<u8>& bytes = saveEvents[i].bytes;
++            ENetPacket* out = enet_packet_create(&bytes[0], bytes.size(),
+                                                  ENET_PACKET_FLAG_RELIABLE);
+             if (isHost_) {
+                 enet_host_broadcast(enetHost_, CH_BULK, out);
+@@ -1736,37 +1749,6 @@ void NetLink::threadLoop() {
+                 enet_packet_destroy(out);
+             }
+         }
+-        for (size_t i = 0; i < saveFiles.size(); ++i) {
+-            unsigned bytes = sizeof(SaveFileHeader) + (unsigned)saveFiles[i].tail.size();
+-            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+-            std::memcpy(out->data, &saveFiles[i].hdr, sizeof(SaveFileHeader));
+-            if (!saveFiles[i].tail.empty())
+-                std::memcpy(out->data + sizeof(SaveFileHeader), &saveFiles[i].tail[0],
+-                            saveFiles[i].tail.size());
+-            if (isHost_) {
+-                enet_host_broadcast(enetHost_, CH_BULK, out);
+-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+-                enet_peer_send(serverPeer_, CH_BULK, out);
+-            } else {
+-                enet_packet_destroy(out);
+-            }
+-        }
+-        for (size_t i = 0; i < saveDones.size(); ++i) {
+-            unsigned bytes = sizeof(SaveDoneHeader)
+-                           + (unsigned)saveDones[i].crcs.size() * sizeof(u32);
+-            ENetPacket* out = enet_packet_create(0, bytes, ENET_PACKET_FLAG_RELIABLE);
+-            std::memcpy(out->data, &saveDones[i].hdr, sizeof(SaveDoneHeader));
+-            if (!saveDones[i].crcs.empty())
+-                std::memcpy(out->data + sizeof(SaveDoneHeader), &saveDones[i].crcs[0],
+-                            saveDones[i].crcs.size() * sizeof(u32));
+-            if (isHost_) {
+-                enet_host_broadcast(enetHost_, CH_BULK, out);
+-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
+-                enet_peer_send(serverPeer_, CH_BULK, out);
+-            } else {
+-                enet_packet_destroy(out);
+-            }
+-        }
+         for (size_t i = 0; i < saveAcks.size(); ++i) {
+             ENetPacket* out = enet_packet_create(&saveAcks[i], sizeof(SaveAckPacket),
+                                                  ENET_PACKET_FLAG_RELIABLE);
+diff --git a/src/plugin/net/NetLink.h b/src/plugin/net/NetLink.h
+index 8d66419..413a899 100644
+--- a/src/plugin/net/NetLink.h
++++ b/src/plugin/net/NetLink.h
+@@ -319,15 +319,12 @@ private:
+     // Reliable runtime-spawn query/description packets (protocol 21). Guarded by outCs_.
+     std::vector<SpawnReqPacket>  outSpawnReq_;
+     std::vector<SpawnInfoPacket> outSpawnInfo_;
+-    // Reliable coordinated-save packets (protocol 31). FILE carries its
+-    // variable tail (relative path + payload) pre-flattened; DONE carries its
+-    // CRC table. Guarded by outCs_.
+-    struct OutSaveFile { SaveFileHeader hdr; std::vector<u8> tail; };
+-    struct OutSaveDone { SaveDoneHeader hdr; std::vector<u32> crcs; };
++    // Reliable coordinated-save packets (protocol 31). BEGIN/FILE/DONE share
++    // one FIFO of owned wire bytes so adjacent transfers cannot be regrouped
++    // into BEGIN,BEGIN,FILE,FILE,DONE,DONE. Guarded by outCs_.
++    struct OutSaveEvent { std::vector<u8> bytes; };
+     std::vector<SaveReqPacket>   outSaveReq_;
+-    std::vector<SaveBeginPacket> outSaveBegin_;
+-    std::vector<OutSaveFile>     outSaveFile_;
+-    std::vector<OutSaveDone>     outSaveDone_;
++    std::vector<OutSaveEvent>    outSaveEvents_;
+     std::vector<SaveAckPacket>   outSaveAck_;
+     // Reliable coordinated-load packets (protocol 32). Guarded by outCs_.
+     std::vector<LoadGoPacket>    outLoadGo_;
+diff --git a/src/plugin/sync/Replicator.h b/src/plugin/sync/Replicator.h
+index 55bc114..1c42bd4 100644
+--- a/src/plugin/sync/Replicator.h
++++ b/src/plugin/sync/Replicator.h
+@@ -95,6 +95,14 @@ public:
+         if (allSquad_.find(k) == allSquad_.end()) return 0;
+         return (ownHands_.find(k) != ownHands_.end()) ? 1 : 2;
+     }
++    // Restore durable private ownership before the first publishOwned census.
++    // Native platoon indices can differ locally; the session supplies the
++    // current complete hand after matching its saved stable body identity.
++    void restorePrivateOwner(const unsigned int h[5], bool own) {
++        Key k; k.t=h[0];k.c=h[1];k.cs=h[2];k.i=h[3];k.s=h[4];
++        if(own){pinPeer_.erase(k);pinOwned_.insert(k);}
++        else {pinOwned_.erase(k);pinPeer_.insert(k);}
++    }
+ 
+     // Scenario support (assault_mint): the hand of the MINTED proxy nearest the
+     // body at refHand - a body this client had no local copy of and had to create
+diff --git a/src/plugin/sync/ReplicatorChannels.cpp b/src/plugin/sync/ReplicatorChannels.cpp
+index 98c3c8c..9acef70 100644
+--- a/src/plugin/sync/ReplicatorChannels.cpp
++++ b/src/plugin/sync/ReplicatorChannels.cpp
+@@ -626,6 +626,7 @@ void Replicator::applyMoneyPool(const SyncContext& ctx) {
+         for (std::deque<InboundMoneyDelta>::iterator it = deltas.begin();
+              it != deltas.end(); ++it) {
+             const MoneyDeltaPacket& p = it->pkt;
++            if (p.epoch != 0) continue; // separate-wallet mode cannot alter pool
+             if (p.seq <= poolAcked_) continue; // already folded (defensive)
+             if (poolTotal_ < 0) {              // no seed yet - adopt the wallet first
+                 int cur = -1;
+@@ -679,6 +680,7 @@ void Replicator::applyMoneyPool(const SyncContext& ctx) {
+     // a round trip and then re-applied.
+     if (totals.empty()) return;
+     const MoneyPacket& p = totals.back().pkt;
++    if (p.mode != 0 || p.epoch != 0) return;
+     if (p.money < 0) return;
+     while (!poolPending_.empty() && poolPending_.front().seq <= p.ackSeq)
+         poolPending_.pop_front();
+diff --git a/src/plugin/sync/ReplicatorSpawn.cpp b/src/plugin/sync/ReplicatorSpawn.cpp
+index 4e56aa4..4404d9f 100644
+--- a/src/plugin/sync/ReplicatorSpawn.cpp
++++ b/src/plugin/sync/ReplicatorSpawn.cpp
+@@ -1165,7 +1165,7 @@ void Replicator::insertPeerMember(GameWorld* gw, Character* c, const Key& newK,
+                                   const char* tag, bool ownIt) {
+     if (!c) return;
+     unsigned int nh[5] = { newK.t, newK.c, newK.cs, newK.i, newK.s };
+-    bool ok = engine::joinPlayerSquadAt(gw, c, nh);
++    bool ok = engine::joinPeerSquadAt(gw, c, nh);
+     // Pin the body's ACTUAL local hand. setFaction assigns a local platoon index
+     // that usually DIFFERS from the owner's streamed hand (each engine numbers
+     // its platoon independently), and publishOwned keys ownership by the captured
+diff --git a/src/prototest/main.cpp b/src/prototest/main.cpp
+index a78a6f2..f2dfda7 100644
+--- a/src/prototest/main.cpp
++++ b/src/prototest/main.cpp
+@@ -96,8 +96,8 @@ static void testSizes() {
+     CHECK_EQ("sizeof(StealthPacket)",           sizeof(StealthPacket),           427);
+     CHECK_EQ("sizeof(SpawnReqPacket)",          sizeof(SpawnReqPacket),          25);
+     CHECK_EQ("sizeof(SpawnInfoPacket)",         sizeof(SpawnInfoPacket),         143);
+-    CHECK_EQ("sizeof(MoneyPacket)",             sizeof(MoneyPacket),             13);
+-    CHECK_EQ("sizeof(MoneyDeltaPacket)",        sizeof(MoneyDeltaPacket),        13);
++    CHECK_EQ("sizeof(MoneyPacket)",             sizeof(MoneyPacket),             18);
++    CHECK_EQ("sizeof(MoneyDeltaPacket)",        sizeof(MoneyDeltaPacket),        17);
+     CHECK_EQ("sizeof(FactionPacket)",           sizeof(FactionPacket),           61);
+     CHECK_EQ("sizeof(TimePacket)",              sizeof(TimePacket),              17);
+     CHECK_EQ("sizeof(DoorPacket)",              sizeof(DoorPacket),              31);
+@@ -310,8 +310,8 @@ static void testSizes() {
+     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
+     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
+           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
+-    CHECK_EQ("PROTOCOL_VERSION (v55: runtime-fixture identity)",
+-             (int)PROTOCOL_VERSION, 55);
++    CHECK_EQ("PROTOCOL_VERSION (v56: separate wallets)",
++             (int)PROTOCOL_VERSION, 56);
+ 
+     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
+     // so the join reports CHANGES and the host the authoritative TOTAL - swap
+@@ -1501,9 +1501,13 @@ static void testFlushWorldStateContract() {
+     { std::deque<u32> out; in.drainLeaves(out);
+       CHECK("session-preserving kept: leave", out.size() == 1); }
+     SP_KEPT("saveReq",   InboundSaveReq,   drainSaveReqs);
+-    SP_KEPT("saveBegin", InboundSaveBegin, drainSaveBegins);
+-    SP_KEPT("saveFile",  InboundSaveFile,  drainSaveFiles);
+-    SP_KEPT("saveDone",  InboundSaveDone,  drainSaveDones);
++    { std::deque<InboundSaveEvent> out; in.drainSaveBatch(out);
++      CHECK("session-preserving kept: save batch", out.size() == 3);
++      if (out.size() == 3) {
++          CHECK("session-preserving save BEGIN order", out[0].type == PKT_SAVE_BEGIN);
++          CHECK("session-preserving save FILE order", out[1].type == PKT_SAVE_FILE);
++          CHECK("session-preserving save DONE order", out[2].type == PKT_SAVE_DONE);
++      } }
+     SP_KEPT("saveAck",   InboundSaveAck,   drainSaveAcks);
+     SP_KEPT("loadGo",    InboundLoadGo,    drainLoadGos);
+     SP_KEPT("loadReq",   InboundLoadReq,   drainLoadReqs);
+diff --git a/scripts/test_empty_container.py b/scripts/test_empty_container.py
+new file mode 100644
+index 0000000..25efcb7
+--- /dev/null
++++ b/scripts/test_empty_container.py
+@@ -0,0 +1,164 @@
++"""Exercise the real applyContainerContents function with a fake engine.
++
++No Kenshi files, headers, or ABI are used. This is a control-flow regression,
++not a plugin build or an in-game test. A C++ compiler is required; exit 77 means
++unavailable. The old empty-container guards are restored in a mutation run,
++which MUST fail. Both runs compile the function extracted from EngineInventory.cpp.
++"""
++import argparse
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE = ROOT / "src/plugin/game/EngineInventory.cpp"
++
++PREFIX = r'''
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
++#include <vector>
++#define __try try
++#define __except(x) catch (...)
++#define EXCEPTION_EXECUTE_HANDLER 1
++#ifndef _MSC_VER
++#define _snprintf snprintf
++#endif
++enum { INV_ITEMS_MAX = 64 };
++struct InvItemEntry {
++    unsigned char parentIdx; unsigned int itemType; char stringID[48];
++};
++struct Inventory { std::vector<InvItemEntry> rows; int calls; Inventory():calls(0){} };
++struct Item { Inventory* sub; Inventory* getInventory(){return sub;} };
++struct RootObject {};
++struct GameWorld {};
++static Inventory owner, bagA, bagB;
++static Item itemA, itemB;
++static RootObject object;
++static bool resolveOwner = true;
++static std::vector<Item*> localItems;
++static std::vector<InvItemEntry> localMeta;
++namespace coop { void logLine(const char*){} }
++bool isContainerItemType(unsigned int type){return type == 46;}
++RootObject* resolveObjectByHand(const unsigned int*) {return resolveOwner?&object:0;}
++Inventory* invOf(RootObject*) {return &owner;}
++unsigned int readInvItems(Inventory*, InvItemEntry* out, Item** objs,
++                         unsigned int maxOut, bool*) {
++    unsigned n = (unsigned)localMeta.size(); if(n>maxOut)n=maxOut;
++    for(unsigned i=0;i<n;++i){out[i]=localMeta[i];objs[i]=localItems[i];} return n;
++}
++// Fake only the low-level mutation. The production function under test must
++// choose the correct nested inventory, list, completeness flag, and call order.
++static bool applyToInventory(GameWorld*,Inventory* inv,const InvItemEntry* rows,
++                             unsigned int n,bool truncated){
++    ++inv->calls;
++    if(inv==&owner)return false;
++    if(!truncated)inv->rows.clear();
++    for(unsigned i=0;i<n;++i)inv->rows.push_back(rows[i]);
++    return true;
++}
++'''
++
++SUFFIX = r'''
++static InvItemEntry row(const char* sid,unsigned type,unsigned parent=0){
++    InvItemEntry e={}; e.itemType=type;e.parentIdx=(unsigned char)parent;
++    std::strncpy(e.stringID,sid,sizeof(e.stringID)-1);return e;
++}
++static void reset(){
++    owner=Inventory();bagA=Inventory();bagB=Inventory();resolveOwner=true;
++    itemA.sub=&bagA;itemB.sub=&bagB;localMeta.clear();localItems.clear();
++    bagA.rows.push_back(row("old_a",4));bagB.rows.push_back(row("old_b",4));
++}
++static void local(const char* sid,Item* it){localMeta.push_back(row(sid,46));localItems.push_back(it);}
++static int failures=0;
++static void check(bool ok,const char* label){std::printf("%s %s\n",ok?"PASS":"FAIL",label);if(!ok)++failures;}
++int main(){
++    GameWorld gw;unsigned h[5]={};
++    reset();local("bag_a",&itemA);
++    InvItemEntry empty[]={row("bag_a",46)};
++    bool changed=applyContainerContents(&gw,h,empty,1,false);
++    check(changed && bagA.rows.empty() && bagA.calls==1,"complete empty bag removes stale child");
++
++    reset();local("bag_a",&itemA);
++    applyContainerContents(&gw,h,empty,1,true);
++    check(bagA.rows.size()==1 && bagA.calls==0,"truncated absent children preserve contents");
++
++    reset();local("bag_a",&itemA);local("bag_b",&itemB);
++    InvItemEntry mixed[]={row("bag_a",46),row("bag_b",46),row("new_b",4,2)};
++    applyContainerContents(&gw,h,mixed,3,false);
++    check(bagA.rows.empty() && bagA.calls==1,"empty bag clears when another bag has children");
++    check(bagB.rows.size()==1 && !std::strcmp(bagB.rows[0].stringID,"new_b"),"nonempty sibling keeps its own children");
++
++    reset();local("bag_a",&itemA);local("bag_b",&itemB);
++    applyContainerContents(&gw,h,mixed,3,true);
++    check(bagA.rows.size()==1 && bagA.calls==0,"truncated mixed snapshot preserves omitted bag contents");
++    check(bagB.rows.size()==2 && bagB.calls==1,"truncated described children remain additive");
++
++    reset();local("bag_a",&itemA);
++    InvItemEntry noParent[]={row("ordinary",4)};
++    applyContainerContents(&gw,h,noParent,1,false);
++    check(bagA.rows.size()==1 && bagA.calls==0,"unmentioned parent does not authorize nested deletion");
++
++    reset();
++    applyContainerContents(&gw,h,empty,1,false);
++    check(bagA.calls==0 && bagB.calls==0,"missing local parent is never fabricated");
++
++    reset();local("same",&itemA);local("same",&itemB);
++    InvItemEntry twins[]={row("same",46),row("same",46),row("new_a",4,1)};
++    applyContainerContents(&gw,h,twins,3,false);
++    check(bagA.rows.size()==1 && !std::strcmp(bagA.rows[0].stringID,"new_a") && bagB.rows.empty(),"same-template empty sibling binds distinct inventory");
++
++    reset();local("bag_a",&itemA);resolveOwner=false;
++    applyContainerContents(&gw,h,empty,1,false);
++    check(bagA.calls==0 && owner.calls==0,"unresolved owner causes no mutation");
++    return failures?1:0;
++}
++'''
++
++def extract(source):
++    start = source.index("bool applyContainerContents(GameWorld*")
++    # The next namespace is the next top-level declaration in this translation unit.
++    end = source.index("\nnamespace {", start)
++    return source[start:end]
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--emit", type=Path, help="write standalone C++ for review without compiling")
++    args = parser.parse_args()
++    function = extract(SOURCE.read_text(encoding="utf-8"))
++    if args.emit:
++        args.emit.write_text(PREFIX + function + SUFFIX, encoding="utf-8")
++        print("EMITTED", args.emit)
++        return 0
++    compiler = next((shutil.which(x) for x in ("cl", "clang++", "g++") if shutil.which(x)), None)
++    if not compiler:
++        print("SKIP: C++ compiler unavailable; native regression and mutation control did not run")
++        return 77
++    mutant = function.replace("if (nTop == 0 || (nNested == 0 && truncated)) return changed;",
++                              "if (nNested == 0) return changed;")
++    mutant = mutant.replace("if (nk == 0 && (truncated || !isContainerItemType(top[t].itemType))) continue;",
++                            "if (nk == 0) continue;")
++    if mutant == function:
++        raise RuntimeError("Mutation could not restore old guards; review source and test")
++    build = ROOT / "build"
++    build.mkdir(exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="kenshi-empty-", dir=build) as temp:
++        for label, body, should_pass in (("fixed", function, True), ("old-guards", mutant, False)):
++            cpp = Path(temp) / (label + ".cpp")
++            exe = Path(temp) / (label + ".exe")
++            cpp.write_text(PREFIX + body + SUFFIX, encoding="utf-8")
++            if Path(compiler).stem.lower() == "cl":
++                command = [compiler, "/nologo", "/EHsc", str(cpp), "/Fe" + str(exe)]
++            else:
++                command = [compiler, "-std=c++11", str(cpp), "-o", str(exe)]
++            subprocess.run(command, cwd=temp, check=True)
++            result = subprocess.run([str(exe)], capture_output=True, text=True)
++            print(label + ":\n" + result.stdout)
++            if (result.returncode == 0) != should_pass:
++                raise RuntimeError(label + " produced an unexpected result")
++    print("PASS: fixed function passes and original guards fail")
++    return 0
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/test_peer_squad_alias.py b/scripts/test_peer_squad_alias.py
+new file mode 100644
+index 0000000..3e34d19
+--- /dev/null
++++ b/scripts/test_peer_squad_alias.py
+@@ -0,0 +1,88 @@
++"""Compile the ACTUAL production remote-platoon resolver against native stubs.
++Use the VC10 x64 developer environment; artifacts stay in the supplied directory.
++"""
++from pathlib import Path
++import argparse,subprocess
++
++ROOT=Path(__file__).resolve().parents[1]
++PRE=r'''
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <cstdio>
++#include <map>
++#include <vector>
++#include <utility>
++struct ActivePlatoon;struct Faction;struct Platoon;
++struct hand { unsigned int index,serial,type,container,containerSerial; ActivePlatoon* getActivePlatoon()const; };
++static std::map<std::pair<unsigned int,unsigned int>,ActivePlatoon*> registry;
++ActivePlatoon* hand::getActivePlatoon()const {std::map<std::pair<unsigned int,unsigned int>,ActivePlatoon*>::iterator it=registry.find(std::make_pair(container,containerSerial));return it==registry.end()?0:it->second;}
++struct Platoon {Faction* faction;hand identity;ActivePlatoon* activePlatoon;Faction* getFaction(){return faction;}const hand& getHandle(){return identity;}};
++struct ActivePlatoon {Platoon* me;};
++struct RootObject {bool player;};
++static int moves=0,creates=0;static bool failCreate=false;
++struct Character:RootObject {ActivePlatoon* tab;Character(){tab=0;player=false;}void setFaction(Faction*,ActivePlatoon* p){tab=p;player=true;++moves;}};
++struct Faction {std::vector<Platoon*> activePlatoons;};
++static ActivePlatoon* make(Faction* f,unsigned int index,unsigned int serial){Platoon* p=new Platoon;ActivePlatoon* a=new ActivePlatoon;p->faction=f;p->identity.index=0;p->identity.serial=0;p->identity.type=34;p->identity.container=index;p->identity.containerSerial=serial;p->activePlatoon=a;a->me=p;f->activePlatoons.push_back(p);registry[std::make_pair(index,serial)]=a;return a;}
++struct PlayerInterface {Faction* faction;ActivePlatoon* createSquad(){if(failCreate)return 0;++creates;return make(faction,500+creates,9000+creates);}};
++struct GameWorld {PlayerInterface* player;};
++static Faction* factionOf(PlayerInterface* p){return p->faction;}
++static ActivePlatoon* platoonOf(Character* c){return c->tab;}
++static Faction* (*g_playerFactionFn)(PlayerInterface*)=&factionOf;
++static ActivePlatoon* (*g_getPlatoonFn)(Character*)=&platoonOf;
++static bool isPlayerSquad(GameWorld*,RootObject* c){return c->player;}
++'''
++POST=r'''
++static int checks=0,failed=0;
++static void check(const char* n,bool ok){++checks;if(!ok)++failed;printf("%s %s\n",ok?"PASS":"FAIL",n);}
++int main(){
++ Faction f,foreign;PlayerInterface p;p.faction=&f;GameWorld gw;gw.player=&p;
++ ActivePlatoon* leader=make(&f,1,111),*empty=make(&f,7,777);Character a,b,c;
++ unsigned int common[5]={1,7,777,9,99},remote[5]={1,65,6565,8,88},other[5]={1,66,6666,8,88};
++ check("empty common native squad resolves exact index and serial",joinPeerSquadAt(&gw,&a,common)&&a.tab==empty&&creates==0);
++ check("unknown remote group creates isolated native squad",joinPeerSquadAt(&gw,&b,remote)&&creates==1&&b.tab!=leader&&b.tab!=empty);
++ ActivePlatoon* alias=b.tab;int prior=moves;
++ check("same member target is idempotent",joinPeerSquadAt(&gw,&b,remote)&&creates==1&&moves==prior);
++ check("second remote member reuses group alias",joinPeerSquadAt(&gw,&c,remote)&&c.tab==alias&&creates==1);
++ check("transport reconnect retaining world cache reuses native group",joinPeerSquadAt(&gw,&c,remote)&&c.tab==alias&&creates==1);
++ check("different remote groups stay separate",joinPeerSquadAt(&gw,&c,other)&&c.tab!=alias&&creates==2);
++ ActivePlatoon* numericCollision=make(&f,65,6565);
++ check("cached alias wins over later native ID collision",joinPeerSquadAt(&gw,&c,remote)&&c.tab==alias&&c.tab!=numericCollision);
++ alias->me->faction=&foreign;
++ check("foreign faction stale alias is rejected",joinPeerSquadAt(&gw,&b,remote)&&b.tab==numericCollision&&b.tab!=alias);
++ unsigned int foreignKey[5]={1,77,7777,8,88};make(&foreign,77,7777);
++ check("foreign native platoon cannot be selected",joinPeerSquadAt(&gw,&b,foreignKey)&&b.tab->me->getFaction()==&f&&creates==3);
++ unsigned int missing[5]={1,99,9999,8,88};failCreate=true;
++ check("failed native group creation never falls back to leader",!joinPeerSquadAt(&gw,&b,missing)&&b.tab!=leader);
++ failCreate=false;clearPeerSquadAliases();int before=creates;
++ check("explicit world reset drops remote aliases",joinPeerSquadAt(&gw,&c,other)&&creates==before+1);
++ GameWorld next;next.player=&p;before=creates;
++ check("world pointer change drops old alias cache",joinPeerSquadAt(&next,&c,other)&&creates==before+1);
++ check("missing world fails closed",!joinPeerSquadAt(0,&c,other));
++ check("missing character fails closed",!joinPeerSquadAt(&gw,0,other));
++ check("missing hand fails closed",!joinPeerSquadAt(&gw,&c,0));
++ printf("peer-squad-alias: %d/%d checks passed\n",checks-failed,checks);return failed?1:0;
++}
++'''
++
++def main():
++ p=argparse.ArgumentParser();p.add_argument('output',type=Path);p.add_argument('--mutation',action='store_true');p.add_argument('--wrong-fields',action='store_true');args=p.parse_args()
++ source=(ROOT/'src/plugin/game/EngineWorld.cpp').read_text()
++ section=source[source.index('static GameWorld* peerSquadWorld=0;'):source.index('// ---- Money + vendor trading')]
++ if args.mutation:
++  section=section.replace('if(!target)target=gw->player->createSquad();','if(!target && !faction->activePlatoons.empty())target=faction->activePlatoons[0]->activePlatoon;')
++ if args.wrong_fields:
++  section=section.replace('ph.container==h[1]&&ph.containerSerial==h[2]','ph.index==h[1]&&ph.serial==h[2]')
++ args.output.mkdir(parents=True,exist_ok=True)
++ stem='peer-squad-alias-wrong-fields' if args.wrong_fields else ('peer-squad-alias-mutant' if args.mutation else 'peer-squad-alias')
++ cpp=args.output/(stem+'.cpp');exe=args.output/(stem+'.exe');obj=args.output/(stem+'.obj')
++ cpp.write_text(PRE+section+POST)
++ build=subprocess.run(['cl','/nologo','/O2','/EHsc','/W3','/Fo'+str(obj.resolve()),'/Fe'+str(exe.resolve()),str(cpp.resolve())],capture_output=True,text=True)
++ (args.output/(stem+'-build.log')).write_text(build.stdout+build.stderr)
++ if build.returncode:raise SystemExit(build.stdout+build.stderr)
++ result=subprocess.run([str(exe.resolve())],capture_output=True,text=True)
++ (args.output/(stem+'.log')).write_text(result.stdout+result.stderr);print(result.stdout)
++ if args.mutation or args.wrong_fields:
++  if result.returncode==0:raise SystemExit('Mutation unexpectedly accepted')
++ else:raise SystemExit(result.returncode)
++
++if __name__=='__main__':main()
+diff --git a/scripts/test_private_recruit.cpp b/scripts/test_private_recruit.cpp
+new file mode 100644
+index 0000000..13cf4c2
+--- /dev/null
++++ b/scripts/test_private_recruit.cpp
+@@ -0,0 +1,55 @@
++// Tests the actual recruit routing helper with a deterministic native adapter.
++// It does not call the game or model the whole replication system.
++#include "../src/plugin/game/PrivateRecruit.h"
++#include <cstdio>
++#include <vector>
++#include <cstring>
++class RootObject { public: unsigned int hand[5]; };
++class Character:public RootObject {};
++class GameWorld {};
++static std::vector<coop::EntityState> roster;
++static std::vector<coop::EntityState> owned;
++static unsigned int movedTo[5];
++static int moves=0;static bool moveOk=true,staleMove=false,handOk=true;
++namespace coop { namespace engine {
++bool readObjectHand(RootObject* obj,unsigned int out[5]) { if(!obj||!handOk)return false;memcpy(out,obj->hand,sizeof(obj->hand));return true; }
++unsigned int captureSquad(GameWorld*,bool,EntityState* out,unsigned int cap) {unsigned int n=(unsigned int)roster.size();if(n>cap)n=cap;for(unsigned int i=0;i<n;++i)out[i]=roster[i];return n;}
++bool joinPlayerSquadAt(GameWorld*,Character* c,const unsigned int h[5]) {++moves;memcpy(movedTo,h,sizeof(movedTo));if(!moveOk)return false;if(!staleMove){c->hand[1]=h[1];c->hand[2]=h[2];++c->hand[3];}return true;}
++}}
++static int classifier(const unsigned int h[5]) {
++    for(unsigned int i=0;i<owned.size();++i){unsigned int x[5];coop::privateRecruit::handOf(owned[i],x);if(!memcmp(h,x,sizeof(x)))return 1;}
++    return 2;
++}
++static coop::EntityState member(unsigned int container,unsigned int serial,unsigned int index) {
++    coop::EntityState e;memset(&e,0,sizeof(e));e.hType=1;e.hContainer=container;e.hContainerSerial=serial;e.hIndex=index;e.hSerial=999+index;return e;
++}
++static void reset(Character& c) {roster.clear();owned.clear();moves=0;moveOk=handOk=true;staleMove=false;coop::privateRecruit::handOf(member(10,100,99),c.hand);}
++static int checks=0,failures=0;
++static void check(const char* n,bool ok){++checks;if(!ok)++failures;std::printf("%s %s\n",ok?"PASS":"FAIL",n);}
++int main(){
++    GameWorld gw;Character c;reset(c);
++    roster.push_back(member(10,100,1));roster.push_back(member(20,200,2));owned.push_back(roster[1]);
++    check("guest recruit leaves host default platoon",coop::privateRecruit::route(&gw,&c,&classifier)==2&&c.hand[1]==20&&c.hand[2]==200&&moves==1);
++    check("verified routed hand preserves body serial",c.hand[4]==1098);
++    check("routing is idempotent once in owned platoon",coop::privateRecruit::route(&gw,&c,&classifier)==1&&moves==1);
++    reset(c);roster.push_back(member(10,100,1));owned.push_back(roster[0]);
++    check("host recruit already in its own tab stays there",coop::privateRecruit::route(&gw,&c,&classifier)==1&&moves==0);
++    reset(c);roster.push_back(member(30,300,3));roster.push_back(member(20,200,2));owned=roster;
++    check("fallback owned anchor is deterministic across roster order",coop::privateRecruit::route(&gw,&c,&classifier)==2&&c.hand[1]==20);
++    reset(c);roster.push_back(member(30,300,3));roster.push_back(member(10,100,1));owned=roster;
++    check("existing owned destination preserved before fallback",coop::privateRecruit::route(&gw,&c,&classifier)==1&&moves==0);
++    reset(c);roster.push_back(member(10,100,99));owned=roster;
++    check("new recruit cannot authorize its own default tab",coop::privateRecruit::route(&gw,&c,&classifier)==0&&moves==0);
++    reset(c);roster.push_back(member(10,100,1));
++    check("missing owned anchor never falls back to peer",coop::privateRecruit::route(&gw,&c,&classifier)==0&&moves==0);
++    reset(c);roster.push_back(member(20,200,2));owned=roster;moveOk=false;
++    check("native move failure is reported",coop::privateRecruit::route(&gw,&c,&classifier)==-1&&c.hand[1]==10);
++    reset(c);roster.push_back(member(20,200,2));owned=roster;staleMove=true;
++    check("success return without actual recontainer is rejected",coop::privateRecruit::route(&gw,&c,&classifier)==-1&&c.hand[1]==10);
++    reset(c);handOk=false;
++    check("unreadable recruit hand fails closed",coop::privateRecruit::route(&gw,&c,&classifier)==-1&&moves==0);
++    check("absent ownership classifier fails closed",coop::privateRecruit::route(&gw,&c,0)==-1);
++    check("absent world fails closed",coop::privateRecruit::route(0,&c,&classifier)==-1);
++    check("absent recruit fails closed",coop::privateRecruit::route(&gw,0,&classifier)==-1);
++    std::printf("private-recruit: %d/%d checks passed\n",checks-failures,checks);return failures?1:0;
++}
+diff --git a/scripts/test_private_squad_session.cpp b/scripts/test_private_squad_session.cpp
+new file mode 100644
+index 0000000..7b7217a
+--- /dev/null
++++ b/scripts/test_private_squad_session.cpp
+@@ -0,0 +1,65 @@
++// Actual production adapter, fake roster/classifier, real atomic Win32 file IO.
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include "../src/plugin/sync/PrivateSquadSession.h"
++#include <cstdio>
++#include <cstring>
++class GameWorld {};
++static std::string root;
++static std::vector<coop::EntityState> roster;
++namespace coop { namespace engine {
++unsigned int captureSquad(GameWorld*,bool,EntityState* out,unsigned int cap){unsigned int n=(unsigned int)roster.size();if(n>cap)n=cap;for(unsigned int i=0;i<n;++i)out[i]=roster[i];return n;}
++} namespace savexfer {std::string saveFolderFor(const std::string& n){return root+"\\"+n;}} }
++struct Adapter {
++    std::map<unsigned int,int> owners;
++    std::vector<std::pair<unsigned int,bool> > applied;
++    std::vector<unsigned int> indices;
++    int ownerClassForHand(const unsigned int h[5]){return owners[h[4]];}
++    void restorePrivateOwner(const unsigned int h[5],bool own){applied.push_back(std::make_pair(h[4],own));indices.push_back(h[3]);}
++};
++static int checks=0,failed=0;
++static void check(const char* n,bool ok){++checks;if(!ok)++failed;printf("%s %s\n",ok?"PASS":"FAIL",n);}
++static coop::EntityState member(unsigned int container,unsigned int serial,unsigned int body,unsigned int index){coop::EntityState e;memset(&e,0,sizeof(e));e.hType=1;e.hContainer=container;e.hContainerSerial=serial;e.hSerial=body;e.hIndex=index;return e;}
++static std::vector<unsigned char> read(const char* name){std::string p=coop::savexfer::saveFolderFor(name)+"\\coop_squads.dat";FILE* f=fopen(p.c_str(),"rb");std::vector<unsigned char> data;if(f){int c;while((c=fgetc(f))!=EOF)data.push_back((unsigned char)c);fclose(f);}return data;}
++static void write(const char* name,const std::vector<unsigned char>& data){std::string folder=coop::savexfer::saveFolderFor(name);CreateDirectoryA(folder.c_str(),0);FILE* f=fopen((folder+"\\coop_squads.dat").c_str(),"wb");if(f){if(!data.empty())fwrite(&data[0],1,data.size(),f);fclose(f);}}
++static void resign(std::vector<unsigned char>& data){unsigned int h=2166136261u;for(unsigned int i=0;i<data.size()-4;++i){h^=data[i];h*=16777619u;}for(int k=0;k<4;++k)data[data.size()-4+k]=(unsigned char)(h>>(k*8));}
++int main(int argc,char** argv){
++    if(argc!=2)return 2;root=argv[1];if(GetFileAttributesA(root.c_str())!=INVALID_FILE_ATTRIBUTES||!CreateDirectoryA(root.c_str(),0))return 2;
++    GameWorld gw;Adapter host;host.owners[101]=1;host.owners[102]=2;host.owners[103]=2;
++    roster.push_back(member(10,100,101,1));roster.push_back(member(20,200,102,2));roster.push_back(member(99,900,103,3));
++    coop::PrivateSquadSession capture;
++    check("host capture freezes all populated owner tabs",capture.capture(&gw,host,"frozen"));
++    host.owners[103]=1;roster[2].hContainer=10;roster[2].hContainerSerial=100;
++    check("frozen sidecar survives later native membership changes",capture.save("frozen"));
++    std::vector<unsigned char> bytes=read("frozen");check("versioned fixed binary format exact size",bytes.size()==64&&bytes[0]=='K'&&bytes[8]==3);
++    roster[2].hContainer=99;roster[2].hContainerSerial=900;roster[0].hIndex=41;roster[1].hIndex=42;roster[2].hIndex=43;
++    Adapter restoredHost;coop::PrivateSquadSession hs;
++    check("valid checksum restores complete host ledger",hs.restore(&gw,restoredHost,"frozen",true)&&restoredHost.applied.size()==3);
++    check("host owner role preserved",restoredHost.applied[0].second&&!restoredHost.applied[1].second);
++    check("additional guest tab survives sorted rank reset",!restoredHost.applied[2].second);
++    check("local index drift restored onto current hand",restoredHost.indices.size()==3&&restoredHost.indices[0]==41&&restoredHost.indices[2]==43);
++    Adapter guest;coop::PrivateSquadSession gs;
++    check("guest restores same bytes with inverted local ownership",gs.restore(&gw,guest,"frozen",false)&&!guest.applied[0].second&&guest.applied[1].second&&guest.applied[2].second);
++    check("restore applies once only per world",gs.restore(&gw,guest,"frozen",false)&&guest.applied.size()==3);
++    check("different save requires explicit world reset",!gs.restore(&gw,guest,"other",false));
++    std::vector<unsigned char> bad=bytes;bad[12]^=1;write("badcrc",bad);Adapter rejected;coop::PrivateSquadSession invalid;
++    check("checksum corruption blocks before applying any pin",!invalid.restore(&gw,rejected,"badcrc",true)&&invalid.blocked()&&rejected.applied.empty());
++    bad=bytes;bad.push_back(0);write("trailing",bad);coop::PrivateSquadSession trailing;
++    check("trailing bytes rejected without partial mutation",!trailing.restore(&gw,rejected,"trailing",true)&&trailing.blocked()&&rejected.applied.empty());
++    bad=bytes;bad[24]=2;resign(bad);write("badowner",bad);coop::PrivateSquadSession owner;
++    check("valid checksum cannot authorize invalid owner role",!owner.restore(&gw,rejected,"badowner",true)&&owner.blocked()&&rejected.applied.empty());
++    bad=bytes;memcpy(&bad[28],&bad[12],16);resign(bad);write("duplicate",bad);coop::PrivateSquadSession duplicate;
++    check("duplicate stable identities rejected atomically",!duplicate.restore(&gw,rejected,"duplicate",true)&&duplicate.blocked()&&rejected.applied.empty());
++    bad=bytes;bad[8]=161;resign(bad);write("oversize",bad);coop::PrivateSquadSession limit;
++    check("record count limit rejected",!limit.restore(&gw,rejected,"oversize",true)&&limit.blocked());
++    coop::EntityState late=roster.back();roster.pop_back();coop::PrivateSquadSession wait;Adapter waiting;
++    check("incomplete loaded roster defers all pins",!wait.restore(&gw,waiting,"frozen",false)&&!wait.blocked()&&waiting.applied.empty());
++    roster.push_back(late);check("complete roster retry restores all owners",wait.restore(&gw,waiting,"frozen",false)&&waiting.applied.size()==3);
++    coop::PrivateSquadSession legacy;Adapter absent;check("absent sidecar permits legacy initial rank ownership",legacy.restore(&gw,absent,"legacy",true)&&absent.applied.empty());
++    host.owners[103]=0;check("unclassified roster rejects capture",!capture.capture(&gw,host,"frozen"));
++    check("failed recapture invalidates previous frozen name",!capture.save("frozen"));
++    check("save without captured name is rejected",!capture.save("unknown"));
++    check("unsafe name rejected",!capture.capture(&gw,host,"../bad")&&!capture.save("../bad"));
++    gs.resetWorld();Adapter again;check("world reset permits fresh restoration",gs.restore(&gw,again,"frozen",false)&&again.applied.size()==3);
++    printf("private-squad-session: %d/%d checks passed\n",checks-failed,checks);return failed?1:0;
++}
+diff --git a/scripts/test_save_receive_order.py b/scripts/test_save_receive_order.py
+new file mode 100644
+index 0000000..7149edf
+--- /dev/null
++++ b/scripts/test_save_receive_order.py
+@@ -0,0 +1,169 @@
++"""Compile actual Inbound.h and extracted pumpSaveReceive with fake save IO.
++
++A deterministic producer injection reproduces the final-chunk race without
++thread timing. Tests receiver ordering, not native disk IO, ENet, or game ABI.
++Original header+pump are the mutation control and must fail. Exit77 = no compiler.
++"""
++import argparse
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++BASE = "5a761e19a4184b42315e96ea7e92e3c1403d54db"
++HEADER = ROOT / "src/plugin/core/Inbound.h"
++PLUGIN = ROOT / "src/plugin/Plugin.cpp"
++
++WINDOWS = r'''
++#ifndef TEST_WINDOWS_H
++#define TEST_WINDOWS_H
++#ifndef _MSC_VER
++#define __int64 long long
++#endif
++typedef int CRITICAL_SECTION;
++inline void InitializeCriticalSection(CRITICAL_SECTION*){}
++inline void DeleteCriticalSection(CRITICAL_SECTION*){}
++inline void EnterCriticalSection(CRITICAL_SECTION*){}
++inline void LeaveCriticalSection(CRITICAL_SECTION*){}
++#endif
++'''
++
++PREFIX = r'''
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++#include "src/plugin/core/Inbound.h"
++static coop::Inbound g_inbound;
++static void produceTail();
++static bool injectTail=false;
++struct TestNet {
++    std::vector<coop::SaveAckPacket> acks;
++    coop::u32 localId(){return 1;}
++    void queueSaveAck(const coop::SaveAckPacket& ack){acks.push_back(ack);}
++} g_net;
++namespace coop { namespace savexfer {
++static u32 activeId=0,checksum=0;
++static unsigned __int64 received=0,expected=0;
++static bool active=false;
++static std::vector<std::string> order;
++void onSaveBegin(const SaveBeginPacket& b){
++    activeId=b.xferId;active=true;received=0;expected=b.totalBytes;checksum=0;order.push_back("B");
++}
++void onSaveFile(const SaveFileHeader& f,const char*,const u8* data){
++    order.push_back("F");
++    if(active && f.xferId==activeId){received+=f.dataLen;for(unsigned i=0;i<f.dataLen;++i)checksum+=data[i];}
++    // Exact adverse interleaving: producer appends the final FILE and DONE after
++    // consumer took the old chunk batch, while processing an earlier chunk.
++    if(injectTail){injectTail=false;produceTail();}
++}
++int onSaveDone(const SaveDoneHeader& d,const u32* crcs,u16* files,unsigned __int64* bytes){
++    order.push_back("D");
++    bool ok=active && d.xferId==activeId && received==expected && crcs && crcs[0]==checksum;
++    if(d.xferId==activeId)active=false;
++    *files=ok?1:0;*bytes=ok?received:0;return ok?1:0;
++}
++} }
++'''
++
++SUFFIX = r'''
++static int failures=0;
++static void check(bool ok,const char* label){std::printf("%s %s\n",ok?"PASS":"FAIL",label);if(!ok)++failures;}
++static void begin(unsigned id,unsigned bytes){
++    coop::SaveBeginPacket b={};b.type=coop::PKT_SAVE_BEGIN;b.xferId=id;b.fileCount=1;b.totalBytes=bytes;
++    g_inbound.pushSaveBegin(0,b);
++}
++static void file(unsigned id,unsigned offset,unsigned char byte){
++    coop::SaveFileHeader h={};h.type=coop::PKT_SAVE_FILE;h.xferId=id;h.fileIdx=0;h.pathLen=1;h.dataLen=1;h.offset=offset;
++    g_inbound.pushSaveFile(0,h,"a",&byte);
++}
++static void done(unsigned id,unsigned sum){
++    coop::SaveDoneHeader d={};d.type=coop::PKT_SAVE_DONE;d.xferId=id;d.fileCount=1;
++    g_inbound.pushSaveDone(0,d,&sum);
++}
++static void produceTail(){file(1,1,9);done(1,16);}
++static void reset(){
++    pumpSaveReceive();g_net.acks.clear();coop::savexfer::order.clear();
++    coop::savexfer::active=false;injectTail=false;
++}
++int main(){
++    reset();begin(1,2);file(1,0,7);injectTail=true;pumpSaveReceive();pumpSaveReceive();
++    check(g_net.acks.size()==1 && g_net.acks[0].ok && g_net.acks[0].bytes==2,"late final chunk reaches receiver before DONE");
++    check(coop::savexfer::order.size()==4 && coop::savexfer::order[0]=="B" && coop::savexfer::order[1]=="F" && coop::savexfer::order[2]=="F" && coop::savexfer::order[3]=="D","producer interleaving preserves B F F D order");
++
++    reset();begin(2,1);file(2,0,3);done(2,3);begin(3,1);file(3,0,5);done(3,5);pumpSaveReceive();
++    check(g_net.acks.size()==2 && g_net.acks[0].xferId==2 && g_net.acks[0].ok && g_net.acks[1].xferId==3 && g_net.acks[1].ok,"adjacent complete transfers retain boundaries");
++    check(coop::savexfer::order.size()==6 && coop::savexfer::order[2]=="D" && coop::savexfer::order[3]=="B","later BEGIN cannot overtake preceding DONE");
++
++    reset();begin(4,1);file(99,0,90);done(99,90);file(4,0,4);done(4,4);pumpSaveReceive();
++    check(g_net.acks.size()==2 && !g_net.acks[0].ok && g_net.acks[1].ok && g_net.acks[1].bytes==1,"stale IDs do not corrupt active transfer");
++
++    reset();begin(5,1);file(5,0,8);done(5,8);g_inbound.flushWorldState();pumpSaveReceive();
++    check(g_net.acks.size()==1 && g_net.acks[0].ok,"ordered stream survives world-state reset");
++
++    reset();begin(6,1);pumpSaveReceive();file(6,0,2);pumpSaveReceive();done(6,2);pumpSaveReceive();
++    check(g_net.acks.size()==1 && g_net.acks[0].ok,"ordinary split-tick transfer commits");
++
++    reset();pumpSaveReceive();pumpSaveReceive();
++    check(g_net.acks.empty() && coop::savexfer::order.empty(),"empty repeated drains do not replay or acknowledge");
++    return failures?1:0;
++}
++'''
++
++def pump(source):
++    start = source.index("void pumpSaveReceive()")
++    return source[start:source.index("\n}", start) + 2]
++
++def old(path):
++    return subprocess.run(["git", "-C", str(ROOT), "show", BASE + ":" + path],
++                          capture_output=True, text=True, check=True).stdout
++
++def materialize(folder, header, function):
++    core = folder / "src/plugin/core"
++    core.mkdir(parents=True, exist_ok=True)
++    (core / "Inbound.h").write_text(header, encoding="utf-8")
++    netproto = folder / "src/netproto"
++    netproto.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(ROOT / "src/netproto/Wire.h", netproto / "Wire.h")
++    (folder / "windows.h").write_text(WINDOWS, encoding="utf-8")
++    (folder / "main.cpp").write_text(PREFIX + function + SUFFIX, encoding="utf-8")
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--emit", type=Path, help="emit standalone harness project without compiling")
++    args = parser.parse_args()
++    header = HEADER.read_text(encoding="utf-8")
++    function = pump(PLUGIN.read_text(encoding="utf-8"))
++    if args.emit:
++        materialize(args.emit, header, function)
++        print("EMITTED", args.emit)
++        return 0
++    compiler = next((shutil.which(x) for x in ("cl", "clang++", "g++") if shutil.which(x)), None)
++    if not compiler:
++        print("SKIP: C++ compiler unavailable; native ordering regression and mutation control did not run")
++        return 77
++    build = ROOT / "build"
++    build.mkdir(exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="kenshi-save-order-", dir=build) as temp:
++        for label, hdr, func, expected in (("fixed", header, function, True),
++                                         ("old-drains", old("src/plugin/core/Inbound.h"), old("src/plugin/Plugin.cpp"), False)):
++            folder = Path(temp).resolve() / label
++            if label == "old-drains":
++                func = pump(func)
++            materialize(folder, hdr, func)
++            exe = folder / "test.exe"
++            if Path(compiler).stem.lower() == "cl":
++                command = [compiler, "/nologo", "/EHsc", "/I" + str(folder), str(folder / "main.cpp"), "/Fe" + str(exe)]
++            else:
++                command = [compiler, "-std=c++11", "-I", str(folder), str(folder / "main.cpp"), "-o", str(exe)]
++            subprocess.run(command, cwd=folder, check=True)
++            result = subprocess.run([str(exe)], capture_output=True, text=True)
++            print(label + ":\n" + result.stdout)
++            if (result.returncode == 0) != expected:
++                raise RuntimeError(label + " produced an unexpected result")
++    print("PASS: actual FIFO header/pump pass and original split queues fail")
++    return 0
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/test_save_send_order.py b/scripts/test_save_send_order.py
+new file mode 100644
+index 0000000..ab815c7
+--- /dev/null
++++ b/scripts/test_save_send_order.py
+@@ -0,0 +1,158 @@
++"""Compile production save queue methods and net-thread drain against fake ENet.
++
++Checks wire bytes and transfer ordering, including producer enqueue during a
++drain. Original grouped queues form a mutation control. Exit77 means no compiler.
++This is not an ENet or game-ABI test.
++"""
++import argparse
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++BASE = "5a761e19a4184b42315e96ea7e92e3c1403d54db"
++
++PREFIX = r'''
++#include <cstdio>
++#include <cstring>
++#include <vector>
++#ifndef _MSC_VER
++#define __int64 long long
++#endif
++#include "Wire.h"
++typedef int CRITICAL_SECTION;
++static void EnterCriticalSection(CRITICAL_SECTION*){}
++static void LeaveCriticalSection(CRITICAL_SECTION*){}
++enum {ENET_PACKET_FLAG_RELIABLE=1, ENET_PEER_STATE_CONNECTED=5, CH_BULK=2};
++struct ENetPeer {int state;};
++struct ENetPacket {unsigned char* data;size_t size;int flags;};
++struct Sent {std::vector<unsigned char> bytes;int channel,flags,route;};
++static std::vector<Sent> sent;
++static int destroyed=0;
++static bool inject=false;
++static void injectTransfer();
++static ENetPacket* enet_packet_create(const void* data,size_t n,int flags){
++    ENetPacket* p=new ENetPacket;p->data=new unsigned char[n];p->size=n;p->flags=flags;
++    if(data)std::memcpy(p->data,data,n);return p;
++}
++static void enet_packet_destroy(ENetPacket* p){++destroyed;delete[]p->data;delete p;}
++static void sendPacket(ENetPacket* p,int channel,int route){
++    Sent s;s.bytes.assign(p->data,p->data+p->size);s.channel=channel;s.flags=p->flags;s.route=route;sent.push_back(s);
++    enet_packet_destroy(p);
++    if(inject){inject=false;injectTransfer();}
++}
++static void enet_host_broadcast(void*,int channel,ENetPacket* p){sendPacket(p,channel,1);}
++static void enet_peer_send(ENetPeer*,int channel,ENetPacket* p){sendPacket(p,channel,2);}
++namespace coop {
++class NetLink {
++public:
++    bool isHost_;void* enetHost_;ENetPeer* serverPeer_;CRITICAL_SECTION outCs_;
++    NetLink():isHost_(true),enetHost_(0),serverPeer_(0),outCs_(0){}
++    void queueSaveReq(const SaveReqPacket&);
++    void queueSaveBegin(const SaveBeginPacket&);
++    void queueSaveFile(const SaveFileHeader&,const char*,const unsigned char*,unsigned int);
++    void queueSaveDone(const SaveDoneHeader&,const u32*,unsigned int);
++    void queueSaveAck(const SaveAckPacket&);
++    void drainForTest();
++'''
++
++SUFFIX = r'''
++} // namespace coop
++static coop::NetLink net;
++static int failures=0;
++static void check(bool ok,const char* label){std::printf("%s %s\n",ok?"PASS":"FAIL",label);if(!ok)++failures;}
++static unsigned idAt(size_t i){
++    if(i>=sent.size())return 0;
++    const unsigned char* p=&sent[i].bytes[0];
++    if(p[0]==coop::PKT_SAVE_BEGIN){coop::SaveBeginPacket h;std::memcpy(&h,p,sizeof(h));return h.xferId;}
++    if(p[0]==coop::PKT_SAVE_FILE){coop::SaveFileHeader h;std::memcpy(&h,p,sizeof(h));return h.xferId;}
++    if(p[0]==coop::PKT_SAVE_DONE){coop::SaveDoneHeader h;std::memcpy(&h,p,sizeof(h));return h.xferId;}
++    return 0;
++}
++static void transfer(unsigned id){
++    coop::SaveBeginPacket b={};b.type=coop::PKT_SAVE_BEGIN;b.xferId=id;b.fileCount=1;b.totalBytes=2;net.queueSaveBegin(b);
++    coop::SaveFileHeader f={};f.type=coop::PKT_SAVE_FILE;f.xferId=id;f.pathLen=1;f.dataLen=2;
++    char path[]="a";unsigned char data[]={7,9};net.queueSaveFile(f,path,data,2);
++    coop::SaveDoneHeader d={};d.type=coop::PKT_SAVE_DONE;d.xferId=id;d.fileCount=1;unsigned crc=16;net.queueSaveDone(d,&crc,1);
++    // Queue owns all variable payloads; later caller mutation must be invisible.
++    path[0]='z';data[0]=99;crc=200;
++}
++static void injectTransfer(){transfer(22);}
++static void reset(){inject=false;net.drainForTest();sent.clear();destroyed=0;net.isHost_=true;net.serverPeer_=0;}
++static bool sequence(unsigned a,unsigned b){
++    if(sent.size()!=6)return false;
++    unsigned types[]={coop::PKT_SAVE_BEGIN,coop::PKT_SAVE_FILE,coop::PKT_SAVE_DONE};
++    for(unsigned i=0;i<6;++i)if(sent[i].bytes[0]!=types[i%3] || idAt(i)!=(i<3?a:b))return false;
++    return true;
++}
++int main(){
++    reset();transfer(1);transfer(2);net.drainForTest();
++    check(sequence(1,2),"adjacent transfers retain B1 F1 D1 B2 F2 D2 order");
++    bool owned=false;
++    for(size_t i=0;i<sent.size();++i)if(sent[i].bytes[0]==coop::PKT_SAVE_FILE){size_t n=sizeof(coop::SaveFileHeader);owned=sent[i].bytes.size()==n+3 && sent[i].bytes[n]=='a' && sent[i].bytes[n+1]==7 && sent[i].bytes[n+2]==9;break;}
++    check(owned,"FILE preserves original header path and owned data bytes");
++    bool crcOk=false;for(size_t i=0;i<sent.size();++i)if(sent[i].bytes[0]==coop::PKT_SAVE_DONE){unsigned crc=0;std::memcpy(&crc,&sent[i].bytes[sizeof(coop::SaveDoneHeader)],sizeof(crc));crcOk=crc==16;break;}
++    check(crcOk,"DONE preserves owned CRC table bytes");
++
++    reset();transfer(11);inject=true;net.drainForTest();
++    check(sent.size()==3 && idAt(0)==11 && idAt(2)==11,"enqueue during send stays outside captured batch");
++    net.drainForTest();check(sequence(11,22),"concurrent producer batch follows prior transfer DONE");
++    size_t count=sent.size();net.drainForTest();check(sent.size()==count,"empty drain does not replay packets");
++    bool traffic=true;for(size_t i=0;i<sent.size();++i)if(sent[i].channel!=CH_BULK || sent[i].flags!=ENET_PACKET_FLAG_RELIABLE || sent[i].route!=1)traffic=false;
++    check(traffic,"host stream remains reliable broadcast on bulk channel");
++
++    reset();net.isHost_=false;transfer(33);net.drainForTest();
++    check(sent.empty() && destroyed==3,"disconnected join destroys unsendable packets");
++    reset();net.isHost_=false;ENetPeer peer;peer.state=ENET_PEER_STATE_CONNECTED;net.serverPeer_=&peer;transfer(44);net.drainForTest();
++    check(sent.size()==3 && sent[0].route==2 && sent[2].route==2,"connected join retains direct server peer routing");
++
++    reset();coop::SaveReqPacket req={};req.type=coop::PKT_SAVE_REQ;net.queueSaveReq(req);transfer(55);coop::SaveAckPacket ack={};ack.type=coop::PKT_SAVE_ACK;net.queueSaveAck(ack);net.drainForTest();
++    check(sent.size()==5 && sent[0].bytes[0]==coop::PKT_SAVE_REQ && sent[4].bytes[0]==coop::PKT_SAVE_ACK,"request and ACK queues retain surrounding behavior");
++    return failures?1:0;
++}
++'''
++
++def components(header, source):
++    start = header.index("    struct OutSave")
++    fields = header[start:header.index("    // Reliable coordinated-load packets", start)]
++    start = source.index("void NetLink::queueSaveReq(")
++    methods = source[start:source.index("void NetLink::queueLoadGo(", start)]
++    start = source.index("template<class T>\nvoid pushLocked(")
++    helper = source[start:source.index("\n}", start)+2]
++    start = source.index("        std::vector<SaveReqPacket>")
++    drain = source[start:source.index("        // Drain + send queued coordinated-load packets", start)]
++    return PREFIX + fields + "};\n" + helper + "\n" + methods + "\nvoid NetLink::drainForTest(){\n" + drain + "}\n" + SUFFIX
++
++def old(path):
++    return subprocess.run(["git", "-C", str(ROOT), "show", BASE + ":" + path],capture_output=True,text=True,check=True).stdout
++
++def main():
++    parser=argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--emit",type=Path)
++    args=parser.parse_args()
++    header=(ROOT/"src/plugin/net/NetLink.h").read_text(encoding="utf-8")
++    source=(ROOT/"src/plugin/net/NetLink.cpp").read_text(encoding="utf-8")
++    program=components(header,source)
++    if args.emit:
++        args.emit.mkdir(parents=True,exist_ok=True)
++        (args.emit/"main.cpp").write_text(program,encoding="utf-8")
++        shutil.copyfile(ROOT/"src/netproto/Wire.h",args.emit/"Wire.h")
++        print("EMITTED",args.emit);return 0
++    compiler=next((shutil.which(x) for x in ("cl","clang++","g++") if shutil.which(x)),None)
++    if not compiler:
++        print("SKIP: C++ compiler unavailable; native send-order regression and mutation control did not run");return 77
++    build=ROOT/"build";build.mkdir(exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="kenshi-send-order-",dir=build) as temp:
++        folder=Path(temp).resolve();shutil.copyfile(ROOT/"src/netproto/Wire.h",folder/"Wire.h")
++        mutant=components(old("src/plugin/net/NetLink.h"),old("src/plugin/net/NetLink.cpp"))
++        for label,code,expected in (("fixed",program,True),("old-grouped",mutant,False)):
++            cpp=folder/(label+".cpp");exe=folder/(label+".exe");cpp.write_text(code,encoding="utf-8")
++            command=([compiler,"/nologo","/EHsc",str(cpp),"/Fe"+str(exe)] if Path(compiler).stem.lower()=="cl" else [compiler,"-std=c++11",str(cpp),"-o",str(exe)])
++            subprocess.run(command,cwd=folder,check=True)
++            result=subprocess.run([str(exe)],capture_output=True,text=True);print(label+":\n"+result.stdout)
++            if (result.returncode==0)!=expected:raise RuntimeError(label+" produced unexpected result")
++    print("PASS: actual FIFO queues/drain pass and original grouped queues fail");return 0
++
++if __name__=="__main__":
++    raise SystemExit(main())
+diff --git a/scripts/test_separate_wallet.cpp b/scripts/test_separate_wallet.cpp
+new file mode 100644
+index 0000000..11a1625
+--- /dev/null
++++ b/scripts/test_separate_wallet.cpp
+@@ -0,0 +1,65 @@
++// Native VC100 regression for the actual production arithmetic ledger.
++// No game, network or disk mocks: this deliberately does not test the session adapter.
++#include "../src/plugin/sync/SeparateWallet.h"
++#include <cstdio>
++#include <climits>
++
++static int checks = 0, failures = 0;
++static void check(const char* name, bool ok) {
++    ++checks;
++    if (!ok) ++failures;
++    std::printf("%s %s\n", ok ? "PASS" : "FAIL", name);
++}
++
++int main() {
++    coop::SeparateWallet w;
++    check("default ledger has no authority epoch", w.epoch == 0 && w.ack == 0);
++    check("uninitialized authority cannot fold a guest delta", !w.fold(0, 1, 200));
++    w.seed(1000);
++    check("legacy total is divided equally", w.host == 500 && w.guest == 500);
++    w.seed(1001);
++    check("odd migration conserves every cat", w.host == 501 && w.guest == 500);
++    w.seed(INT_MAX);
++    check("maximum migration avoids signed overflow", (__int64)w.host + w.guest == INT_MAX);
++    w.seed(-50);
++    check("negative legacy input cannot create debt", w.host == 0 && w.guest == 0);
++    w.seed(1);
++    check("single cat belongs to exactly one slot", w.host == 1 && w.guest == 0);
++
++    w.seed(1000); w.epoch = 41;
++    check("first ordered guest spend is accepted", w.fold(41, 1, -120));
++    check("guest spend does not debit host", w.host == 500 && w.guest == 380 && w.ack == 1);
++    check("replayed guest spend is rejected", !w.fold(41, 1, -120));
++    check("replay preserves balances and sequence", w.host == 500 && w.guest == 380 && w.ack == 1);
++    check("missing preceding sequence is rejected", !w.fold(41, 3, -30));
++    check("stale world epoch is rejected", !w.fold(40, 2, -30));
++    check("future unnegotiated epoch is rejected", !w.fold(42, 2, -30));
++    check("zero epoch cannot authorize a guest", !w.fold(0, 2, 100));
++    check("rejected messages leave ledger unchanged", w.host == 500 && w.guest == 380 && w.ack == 1);
++    check("guest income only credits guest", w.fold(41, 2, 220) && w.guest == 600 && w.host == 500);
++    check("zero delta still acknowledges its ordered sequence", w.fold(41, 3, 0) && w.ack == 3 && w.guest == 600);
++    check("overdraft has an explicit zero floor", w.fold(41, 4, INT_MIN) && w.guest == 0 && w.host == 500);
++    check("maximum positive delta is bounded", w.fold(41, 5, INT_MAX) && w.guest == INT_MAX);
++    check("positive addition cannot overflow into debt", w.fold(41, 6, INT_MAX) && w.guest == INT_MAX);
++    check("minimum negative delta cannot underflow", w.fold(41, 7, INT_MIN) && w.guest == 0);
++    check("bounds clamp below zero", coop::SeparateWallet::bounded(-2147483649LL) == 0);
++    check("bounds clamp above engine wallet limit", coop::SeparateWallet::bounded(4294967294LL) == INT_MAX);
++
++    // Model independent host activity interleaved with 100 guest operations.
++    w.seed(1000); w.epoch = 99;
++    bool invariant = true;
++    for (unsigned int i = 1; i <= 100; ++i) {
++        w.host += 3;
++        int beforeHost = w.host;
++        int delta = (i % 2) ? -7 : 11;
++        int expected = coop::SeparateWallet::bounded((__int64)w.guest + delta);
++        invariant = w.fold(99, i, delta) && w.host == beforeHost &&
++                    w.guest == expected && w.ack == i && invariant;
++    }
++    check("interleaved independent economy preserves slot ownership", invariant && w.host == 800 && w.guest == 700);
++    coop::SeparateWallet frozen = w;
++    w.fold(99, 101, -10); w.host -= 20;
++    check("by-value save snapshot remains frozen during later spending", frozen.host == 800 && frozen.guest == 700 && frozen.ack == 100);
++    std::printf("separate-wallet: %d/%d checks passed\n", checks - failures, checks);
++    return failures ? 1 : 0;
++}
+diff --git a/scripts/test_separate_wallet_session.cpp b/scripts/test_separate_wallet_session.cpp
+new file mode 100644
+index 0000000..2b09add
+--- /dev/null
++++ b/scripts/test_separate_wallet_session.cpp
+@@ -0,0 +1,113 @@
++// Actual production session adapter with fake engine wallets/packet queues.
++// Uses real Win32 atomic sidecar IO in a fresh caller-supplied test directory.
++// No game processes or original saves are touched.
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++#include <deque>
++#include <map>
++#include "../src/netproto/Wire.h"
++
++class GameWorld { public: int wallet; explicit GameWorld(int n):wallet(n){} };
++static std::string testRoot;
++namespace coop {
++void logLine(const char* text) { std::printf("LOG %s\n", text); }
++struct InboundMoney { MoneyPacket pkt; };
++struct InboundMoneyDelta { MoneyDeltaPacket pkt; };
++class Inbound {
++public:
++    std::deque<InboundMoney> money;
++    std::deque<InboundMoneyDelta> deltas;
++    void drainMoney(std::deque<InboundMoney>& out) { out.swap(money); }
++    void drainMoneyDeltas(std::deque<InboundMoneyDelta>& out) { out.swap(deltas); }
++    void push(const MoneyPacket& p) { InboundMoney v;v.pkt=p;money.push_back(v); }
++    void push(const MoneyDeltaPacket& p) { InboundMoneyDelta v;v.pkt=p;deltas.push_back(v); }
++};
++class NetLink {
++public:
++    std::vector<MoneyPacket> money;
++    std::vector<MoneyDeltaPacket> deltas;
++    void queueMoney(const MoneyPacket& p) { money.push_back(p); }
++    void queueMoneyDelta(const MoneyDeltaPacket& p) { deltas.push_back(p); }
++};
++namespace engine {
++bool readPlayerWallet(GameWorld* gw,int* out) { if(!gw||!out)return false;*out=gw->wallet;return true; }
++bool writePlayerWallet(GameWorld* gw,int value) { if(!gw||value<0)return false;gw->wallet=value;return true; }
++void saveInfo(char* out,unsigned int n,char*,unsigned int) { if(n){strncpy(out,"fixture",n-1);out[n-1]=0;} }
++}
++namespace savexfer {
++std::string saveFolderFor(const std::string& name) { return testRoot+"\\"+name; }
++}
++}
++#include "../src/plugin/sync/SeparateWalletSession.h"
++
++static int checks=0,failures=0;
++static void check(const char* name,bool ok) { ++checks;if(!ok)++failures;std::printf("%s %s\n",ok?"PASS":"FAIL",name); }
++static bool balances(const char* name,int wantHost,int wantGuest) {
++    std::string path=coop::savexfer::saveFolderFor(name)+"\\coop_wallets.dat";
++    FILE* f=fopen(path.c_str(),"rb");if(!f)return false;
++    int h=-1,g=-1;unsigned int sum=0;
++    int n=fscanf(f,"KCOOP_WALLETS_1 %d %d %u",&h,&g,&sum);fclose(f);
++    return n==3 && h==wantHost && g==wantGuest;
++}
++int main(int argc,char** argv) {
++    if(argc!=2){std::fprintf(stderr,"Pass a NEW empty directory inside local/native-regressions\n");return 2;}
++    testRoot=argv[1];
++    if(GetFileAttributesA(testRoot.c_str())!=INVALID_FILE_ATTRIBUTES){std::fprintf(stderr,"Refusing existing test directory\n");return 2;}
++    if(!CreateDirectoryA(testRoot.c_str(),0))return 2;
++    coop::SeparateWalletSession host,guest;
++    coop::Inbound hi,gi;coop::NetLink hn,gn;GameWorld hw(1000),gw(1000);
++    check("guest save gate starts closed",!guest.readyForSave());
++    host.tick(&hw,hi,hn,0,true);
++    check("host migrates shared balance once",hw.wallet==500 && hn.money.size()==1 && hn.money.back().money==500);
++    guest.tick(&gw,gi,gn,1,false);
++    check("uninitialized guest cannot spend host native wallet",gw.wallet==0 && !guest.readyForSave());
++    gi.push(hn.money.back());guest.tick(&gw,gi,gn,1,false);
++    check("authoritative first snapshot opens guest save gate",gw.wallet==500 && guest.readyForSave());
++
++    gw.wallet-=100;guest.tick(&gw,gi,gn,1,false);
++    check("local purchase immediately closes save gate",gw.wallet==400 && !guest.readyForSave());
++    check("purchase emits ordered debit",gn.deltas.size()==1 && gn.deltas[0].seq==1 && gn.deltas[0].delta==-100);
++    // Deliberately model the former CH_BULK request overtaking CH_RELIABLE money.
++    // The production readyForSave query prevents a caller from taking this path.
++    host.capture(&hw,"unsafe_before_ack");
++    check("bypassing save gate reproduces pre-debit frozen snapshot",host.save("unsafe_before_ack") && balances("unsafe_before_ack",500,500));
++    hi.push(gn.deltas[0]);host.tick(&hw,hi,hn,0,true);
++    check("host folds debit without spending host funds",hw.wallet==500 && hn.money.back().money==400 && hn.money.back().ackSeq==1);
++    check("guest gate waits for delivered ACK, not elapsed time",!guest.readyForSave());
++    gi.push(hn.money.back());guest.tick(&gw,gi,gn,1,false);
++    check("matching ACK opens guest save gate",guest.readyForSave() && gw.wallet==400);
++    host.capture(&hw,"after_ack");
++    check("ACK-fenced save persists both correct balances",host.save("after_ack") && balances("after_ack",500,400));
++    hw.wallet-=25;host.tick(&hw,hi,hn,0,true);
++    check("spend during folder quiescence cannot change frozen save",host.save("after_ack") && balances("after_ack",500,400));
++    host.capture(&hw,"later");
++    check("later save captures later host spending",host.save("later") && balances("later",475,400));
++
++    gw.wallet-=20;guest.tick(&gw,gi,gn,1,false);
++    check("second purchase remains pending before reconnect",!guest.readyForSave() && gn.deltas.back().seq==2);
++    gn.deltas.clear(); // Lost with the previous ENet connection.
++    guest.resetWorld(false);gw.wallet=475;
++    check("guest bootstrap reload keeps save gate closed",!guest.readyForSave());
++    gi.push(hn.money.back());guest.tick(&gw,gi,gn,3,false);
++    check("same-epoch reload preserves optimistic pending debit",gw.wallet==380 && !guest.readyForSave());
++    bool replay=!gn.deltas.empty() && gn.deltas.back().seq==2 && gn.deltas.back().delta==-20;
++    check("reconnect replays debit under replacement peer identity",replay && gn.deltas.back().ownerId==3);
++    if(replay){hi.push(gn.deltas.back());hi.push(gn.deltas.back());host.tick(&hw,hi,hn,0,true);}
++    check("duplicate reconnect replay debits exactly once",hn.money.back().money==380 && hn.money.back().ackSeq==2 && hw.wallet==475);
++    gi.push(hn.money.back());guest.tick(&gw,gi,gn,3,false);
++    check("replay ACK releases deferred guest save",guest.readyForSave() && gw.wallet==380);
++
++    // A different authority epoch denotes intentional rollback; old pending
++    // operations must not be replayed into the restored saved world.
++    gw.wallet-=10;guest.tick(&gw,gi,gn,3,false);guest.resetWorld(false);gw.wallet=500;
++    coop::MoneyPacket rollback=hn.money.back();++rollback.epoch;rollback.ackSeq=0;rollback.money=500;
++    gn.deltas.clear();gi.push(rollback);guest.tick(&gw,gi,gn,3,false);
++    check("new world epoch discards old-world pending purchase",gw.wallet==500 && guest.readyForSave() && gn.deltas.empty());
++    std::printf("separate-wallet-session: %d/%d checks passed\n",checks-failures,checks);
++    return failures?1:0;
++}
+diff --git a/scripts/test_stale_disconnect.py b/scripts/test_stale_disconnect.py
+new file mode 100644
+index 0000000..bc9bbfd
+--- /dev/null
++++ b/scripts/test_stale_disconnect.py
+@@ -0,0 +1,156 @@
++"""Run extracted production peer-event handlers against a fake engine/network.
++
++This tests reconnect lifecycle decisions, not the plugin ABI. A C++ compiler is
++required; exit 77 means unavailable. The old unconditional-leave behavior must
++fail the same cases as a mutation control. No game or network access is needed.
++"""
++import argparse
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE = ROOT / "src/plugin/Plugin.cpp"
++
++PREFIX = r'''
++#include <cstdio>
++#include <deque>
++#include <set>
++#include <string>
++#include <vector>
++#ifndef _MSC_VER
++#define _snprintf snprintf
++#endif
++struct GameWorld {};
++namespace coop {
++    typedef unsigned int u32;
++    const u32 OWNER_ID_ALL = 0xffffffffu;
++    namespace engine {
++        static bool suppressed=false;
++        static int suppressWrites=0;
++        void setSaveSuppress(bool on){suppressed=on;++suppressWrites;}
++    }
++}
++struct Session {std::set<coop::u32> peerIds;} g_session;
++struct Cfg {bool isHost,latejoinSync,saveSync,carrySync,furnSync;} g_cfg;
++struct Net {unsigned localId(){return g_cfg.isHost?0:1;}void bumpSessionEpoch(){}} g_net;
++struct Inbound {
++    std::deque<coop::u32> connects,leaves;int flushes;
++    Inbound():flushes(0){}
++    void drainConnects(std::deque<coop::u32>& out){out.swap(connects);}
++    void drainLeaves(std::deque<coop::u32>& out){out.swap(leaves);}
++    void flushWorldState(){++flushes;}
++} g_inbound;
++struct Repl {
++    int clears,sweeps,resyncs,resets;
++    Repl():clears(0),sweeps(0),resyncs(0),resets(0){}
++    void onPeerConnected(Net&,unsigned){++resyncs;}
++    void sweepCarries(GameWorld*){++sweeps;}
++    void clearPeerReplicationState(GameWorld*){++clears;}
++    void resetSession(){++resets;}
++} g_repl;
++static bool g_peerPresent=false,g_gameStarted=false;
++static GameWorld* g_lastGw=0;
++static std::vector<std::string> logs;
++static void coopLog(const char* s){logs.push_back(s);}
++static void armConnectPush(){}
++'''
++
++SUFFIX = r'''
++static GameWorld world;
++static int failures=0;
++static void check(bool ok,const char* label){std::printf("%s %s\n",ok?"PASS":"FAIL",label);if(!ok)++failures;}
++static void reset(bool host=true){
++    g_session.peerIds.clear();g_peerPresent=false;g_lastGw=0;g_gameStarted=false;
++    g_inbound=Inbound();g_repl=Repl();logs.clear();
++    g_cfg.isHost=host;g_cfg.latejoinSync=true;g_cfg.saveSync=true;
++    g_cfg.carrySync=true;g_cfg.furnSync=true;
++    coop::engine::suppressed=false;coop::engine::suppressWrites=0;
++}
++static void connect(unsigned id){g_inbound.connects.push_back(id);processNetEvents(&world);}
++static void leave(unsigned id){g_inbound.leaves.push_back(id);processNetEvents(&world);}
++int main(){
++    reset();connect(2);connect(3);leave(2);
++    check(g_peerPresent,"replacement remains present after old socket disconnects");
++    check(g_repl.clears==0 && g_repl.sweeps==0 && g_inbound.flushes==0,"stale departure preserves replacement proxies carries and queues");
++    leave(3);
++    check(!g_peerPresent && g_repl.clears==1 && g_repl.sweeps==1 && g_inbound.flushes==1,"final departure tears down exactly once");
++    leave(3);leave(90);
++    check(g_repl.clears==1 && g_repl.sweeps==1 && g_inbound.flushes==1,"duplicate unknown departures cause no teardown");
++
++    reset();connect(4);g_inbound.connects.push_back(5);g_inbound.leaves.push_back(4);processNetEvents(&world);
++    check(g_peerPresent && g_repl.clears==0 && g_inbound.flushes==0,"same-drain replacement and old leave preserve session");
++
++    reset();connect(7);leave(0);
++    check(g_peerPresent && g_repl.clears==0,"unadmitted host socket disconnect cannot erase admitted peer");
++
++    reset(false);connect(0);leave(coop::OWNER_ID_ALL);
++    check(!g_peerPresent && !coop::engine::suppressed && coop::engine::suppressWrites==2 && g_repl.clears==1,"join wildcard departure releases sole host and native save suppression");
++    leave(coop::OWNER_ID_ALL);
++    check(g_repl.clears==1 && coop::engine::suppressWrites==2,"duplicate join wildcard is idempotent");
++
++    reset();connect(2);connect(3);g_inbound.leaves.push_back(2);g_inbound.leaves.push_back(3);processNetEvents(&world);
++    check(!g_peerPresent && g_repl.clears==1 && g_inbound.flushes==1,"all peer departures in one drain clear once");
++
++    reset();connect(2);connect(2);leave(2);
++    check(!g_peerPresent && g_repl.clears==1,"duplicate connect is one tracked socket");
++
++    reset();connect(2);sessionResetForUi();
++    check(!g_peerPresent && g_session.peerIds.empty(),"manual network reset clears peer identities");
++    connect(3);leave(3);
++    check(!g_peerPresent && g_repl.clears==1,"fresh UI session cannot inherit stale peers");
++
++    reset();connect(9);g_inbound.leaves.push_back(9);processNetEvents(0);
++    check(!g_peerPresent && g_repl.sweeps==0 && g_repl.clears==1,"title-screen final disconnect skips world carry access");
++    return failures?1:0;
++}
++'''
++
++def extract(source, name):
++    start = source.index("void " + name + "(")
++    end = source.index("\n}", start) + 2
++    return source[start:end]
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--emit", type=Path, help="emit isolated C++ without compiling")
++    args = parser.parse_args()
++    source = SOURCE.read_text(encoding="utf-8")
++    reset = extract(source, "sessionResetForUi")
++    events = extract(source, "processNetEvents")
++    if args.emit:
++        args.emit.write_text(PREFIX + reset + "\n" + events + SUFFIX, encoding="utf-8")
++        print("EMITTED", args.emit)
++        return 0
++    compiler = next((shutil.which(x) for x in ("cl", "clang++", "g++") if shutil.which(x)), None)
++    if not compiler:
++        print("SKIP: C++ compiler unavailable; native regression and mutation control did not run")
++        return 77
++    # Restore the exact original handler from the pinned source base for the A/B control.
++    old = subprocess.run(["git", "-C", str(ROOT), "show", "5a761e19a4184b42315e96ea7e92e3c1403d54db:src/plugin/Plugin.cpp"],
++                         capture_output=True, text=True, check=True).stdout
++    mutant = extract(old, "processNetEvents")
++    if mutant == events:
++        raise RuntimeError("Mutation is unchanged; patched handler was not found")
++    build = ROOT / "build"
++    build.mkdir(exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="kenshi-peer-", dir=build) as temp:
++        for label, handler, expected in (("fixed", events, True), ("old-handler", mutant, False)):
++            cpp = Path(temp) / (label + ".cpp")
++            exe = Path(temp) / (label + ".exe")
++            cpp.write_text(PREFIX + reset + "\n" + handler + SUFFIX, encoding="utf-8")
++            if Path(compiler).stem.lower() == "cl":
++                command = [compiler, "/nologo", "/EHsc", str(cpp), "/Fe" + str(exe)]
++            else:
++                command = [compiler, "-std=c++11", str(cpp), "-o", str(exe)]
++            subprocess.run(command, cwd=temp, check=True)
++            result = subprocess.run([str(exe)], capture_output=True, text=True)
++            print(label + ":\n" + result.stdout)
++            if (result.returncode == 0) != expected:
++                raise RuntimeError(label + " produced an unexpected result")
++    print("PASS: fixed production handler passes and old handler fails")
++    return 0
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/src/plugin/game/PrivateRecruit.h b/src/plugin/game/PrivateRecruit.h
+new file mode 100644
+index 0000000..dbc133f
+--- /dev/null
++++ b/src/plugin/game/PrivateRecruit.h
+@@ -0,0 +1,46 @@
++#pragma once
++#include "Engine.h"
++
++// Route a successful LOCAL recruit before its final hand is captured by the
++// recruit detour. Native platoon membership, unlike temporary ownership pins,
++// survives the shared save and restores the correct owner after a reload.
++namespace coop {
++namespace privateRecruit {
++inline void handOf(const EntityState& e, unsigned int h[5]) {
++    h[0]=e.hType;h[1]=e.hContainer;h[2]=e.hContainerSerial;
++    h[3]=e.hIndex;h[4]=e.hSerial;
++}
++inline bool lessHand(const unsigned int a[5],const unsigned int b[5]) {
++    for(unsigned int i=0;i<5;++i){if(a[i]!=b[i])return a[i]<b[i];}
++    return false;
++}
++// 1 = already in an owned tab, 2 = moved and verified, 0 = no owned anchor,
++// -1 = native hand/move unavailable. Never fall back to the peer's first tab.
++inline int route(GameWorld* gw,Character* recruit,engine::InvOwnerClassFn owner) {
++    if(!gw||!recruit||!owner)return -1;
++    unsigned int current[5]={0,0,0,0,0};
++    if(!engine::readObjectHand(reinterpret_cast<RootObject*>(recruit),current))return -1;
++    const unsigned int CAP=160;
++    EntityState rows[CAP];
++    unsigned int count=engine::captureSquad(gw,false,rows,CAP);
++    bool found=false;unsigned int target[5]={0,0,0,0,0};
++    for(unsigned int i=0;i<count&&i<CAP;++i){
++        unsigned int h[5];handOf(rows[i],h);
++        // Ownership is sampled before this engine tick. A native recruit may
++        // already appear in the new roster, but cannot be its own owner anchor.
++        bool same=true;for(unsigned int k=0;k<5;++k)if(h[k]!=current[k])same=false;
++        if(same||owner(h)!=1)continue;
++        if(h[1]==current[1]&&h[2]==current[2])return 1;
++        if(!found||lessHand(h,target)){
++            for(unsigned int k=0;k<5;++k)target[k]=h[k];
++            found=true;
++        }
++    }
++    if(!found)return 0;
++    if(!engine::joinPlayerSquadAt(gw,recruit,target))return -1;
++    unsigned int after[5]={0,0,0,0,0};
++    if(!engine::readObjectHand(reinterpret_cast<RootObject*>(recruit),after))return -1;
++    return after[1]==target[1]&&after[2]==target[2]?2:-1;
++}
++}
++}
+diff --git a/src/plugin/game/PrivateSquadUi.h b/src/plugin/game/PrivateSquadUi.h
+new file mode 100644
+index 0000000..a162a86
+--- /dev/null
++++ b/src/plugin/game/PrivateSquadUi.h
+@@ -0,0 +1,231 @@
++#pragma once
++#include <kenshi/gui/MainBarGUI.h>
++#include <kenshi/gui/PortraitManager.h>
++#include <kenshi/gui/SquadManagementScreen.h>
++#include <kenshi/Globals.h>
++#include <kenshi/GlobalConstants.h>
++#include <mygui/MyGUI_TabControl.h>
++
++// Presentation-only filters. Never remove platoons from the faction, the
++// player roster, or a save. Keep native portrait/index maps intact.
++namespace coop { namespace engine { namespace privateSquads {
++static InvOwnerClassFn classify=0;
++static GameWorld* world=0;
++static bool enabled=false, ready=false;
++static DWORD mainThread=0;
++static std::set<ActivePlatoon*> localTabs;
++// Session-only identities for empty squads explicitly created in our UI.
++// Native world/network squad creation never enters the onAddSquad scope.
++static std::set<hand> createdTabs;
++static unsigned int addSquadDepth=0,localCharacterCount=0;
++static Character* firstLocalCharacter=0;
++static bool active(){return enabled&&ready&&GetCurrentThreadId()==mainThread;}
++static int characterClass(RootObject* c) {
++    unsigned int h[5]={0,0,0,0,0};
++    return c&&classify&&readObjectHand(c,h)?classify(h):0;
++}
++static bool owns(ActivePlatoon* p){return localTabs.find(p)!=localTabs.end();}
++typedef void (__fastcall* BarFn)(MainBarGUI*);
++typedef void (__fastcall* ManageFn)(SquadManagementScreen*);
++typedef void (__fastcall* CellFn)(PortraitMainCellView*,const MyGUI::IBDrawItemInfo&,PortraitData*);
++typedef void (__fastcall* SquadCellFn)(SquadManagementScreen::PortraitSquadCellView*,const MyGUI::IBDrawItemInfo&,PortraitData*);
++typedef void (__fastcall* SelectFn)(PlayerInterface*,RootObject*,bool);
++typedef void (__fastcall* AddSquadFn)(SquadManagementScreen*,MyGUI::Widget*);
++typedef ActivePlatoon* (__fastcall* CreateSquadFn)(PlayerInterface*);
++// The bundled MyGUI has an extra update flag absent from the SDK header.
++// Resolve its real ABI instead of importing the nonexistent SDK overload.
++typedef void (__fastcall* RemoveUiItemFn)(MyGUI::ItemBox*,size_t,bool);
++static BarFn barOriginal=0,refreshBarOriginal=0;
++static ManageFn manageOriginal=0,refreshManageOriginal=0;
++static CellFn cellOriginal=0;
++static SquadCellFn squadCellOriginal=0;
++static SelectFn selectOriginal=0;
++static AddSquadFn addSquadOriginal=0;
++static CreateSquadFn createSquadOriginal=0;
++static RemoveUiItemFn removeUiItem=0;
++static bool refreshDeferred=false;
++static bool canRefreshPortraits() {
++    // Native refreshPortraitTabs unconditionally dereferences the selected
++    // Platoon's activePlatoon. During a shared-world load, that tab can be
++    // registered before its first character activates it. Defer the WHOLE
++    // native refresh, before any UI mutation, until its precondition holds.
++    __try {
++        if(!ou||!ou->player)return false;
++        Platoon* p=ou->player->getCurrentPlatoon();
++        return p&&p->activePlatoon;
++    }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
++}
++
++// MyGUI's public setButtonWidth maps width <= 0 to the default width.
++// Steam 1.0.65's bundled MyGUI keeps TabItemInfo at +0x580 (stride 0x58)
++// and the sum of widths at +0x4b8. Validate every entry against the public
++// API before touching this presentation-only state. No TabItem is removed.
++class TabBarAccess : public MyGUI::TabControl {
++public:
++    void relayoutPrivateTabs(){updateBar();}
++};
++static bool collapseTab(MyGUI::TabControl* tabs,size_t index) {
++    size_t count=tabs->getItemCount();
++    if(index>=count||count>1024)return false;
++    char* raw=reinterpret_cast<char*>(tabs);
++    char* begin=*reinterpret_cast<char**>(raw+0x580);
++    char* end=*reinterpret_cast<char**>(raw+0x588);
++    if(!begin||end<begin||size_t(end-begin)!=count*0x58)return false;
++    int total=0;
++    for(size_t i=0;i<count;++i){
++        int width=*reinterpret_cast<int*>(begin+i*0x58);
++        if(width<0||width>100000||tabs->getButtonWidthAt(i)!=width)return false;
++        total+=width;
++    }
++    int& widthSum=*reinterpret_cast<int*>(raw+0x4b8);
++    if(total!=widthSum)return false;
++    int& width=*reinterpret_cast<int*>(begin+index*0x58);
++    if(width){
++        widthSum-=width; width=0;
++        reinterpret_cast<TabBarAccess*>(tabs)->relayoutPrivateTabs();
++    }
++    return true;
++}
++
++static void filterBar(MainBarGUI* bar) {
++    if(!active()||!bar)return;
++    __try {
++        // A loaded save can already focus the other player's character before
++        // the selection hook is enabled. Check the actual displayed object;
++        // selectedCharacter can retain an older PC while an NPC is inspected.
++        if(world&&world->player&&characterClass(bar->selectedObject.getRootObject())==2){
++            world->player->clearSelection();
++            if(firstLocalCharacter&&characterClass(static_cast<RootObject*>(firstLocalCharacter))==1)
++                world->player->_selectPlayerCharacter(static_cast<RootObject*>(firstLocalCharacter),false,false);
++        }
++        MyGUI::TabControl* tabs=bar->portraitsTabPanel;
++        if(!tabs)return;
++        MyGUI::TabItem* first=0;bool selectedOwn=false;
++        for(size_t i=0;i<bar->tabPortraits.size();++i){
++            MainTabPortraitPlatoon& t=bar->tabPortraits[i];if(!t.tab)continue;
++            bool mine=owns(t.platoon);
++            if(mine){
++                if(tabs->getButtonWidth(t.tab)==0)tabs->setButtonWidth(t.tab,MyGUI::DEFAULT);
++            }else if(!collapseTab(tabs,tabs->getItemIndex(t.tab))){
++                static bool reported=false;
++                if(!reported){reported=true;logLine("[private-squads] ERROR unsupported MyGUI tab layout");}
++            }
++            if(mine){if(!first)first=t.tab;if(tabs->getItemSelected()==t.tab)selectedOwn=true;}
++        }
++        if(first&&!selectedOwn)tabs->setItemSelected(first);
++    }__except(EXCEPTION_EXECUTE_HANDLER){logLine("[private-squads] ERROR mainbar filter unavailable");}
++}
++static void updateCountCaption(SquadManagementScreen* screen) {
++    if(!screen->txtFactionSize||!con)return;
++    char caption[64];
++    _snprintf_s(caption,sizeof(caption),_TRUNCATE,"%u/%d",localCharacterCount,con->MAX_FACTION_SIZE);
++    // Preserve native factionSize: it is the game's global change cache.
++    screen->txtFactionSize->setCaption(MyGUI::UString(caption));
++}
++static void filterManage(SquadManagementScreen* screen) {
++    if(!active()||!screen)return;
++    __try {
++        if(!screen->panelSquads)return;
++        MyGUI::ItemBox* box=screen->panelSquads->getItemBox();if(!box)return;
++        for(size_t i=box->getItemCount();i>0;--i){
++            SquadManagementScreen::SquadData** p=box->getItemDataAt<SquadManagementScreen::SquadData*>(i-1,false);
++            if(p&&*p&&!owns((*p)->platoon)&&removeUiItem)removeUiItem(box,i-1,true);
++        }
++        updateCountCaption(screen);
++    }__except(EXCEPTION_EXECUTE_HANDLER){logLine("[private-squads] ERROR management filter unavailable");}
++}
++static void __fastcall barHook(MainBarGUI* p){
++    if(refreshDeferred&&canRefreshPortraits()){
++        refreshDeferred=false;refreshBarOriginal(p);
++        logLine("[private-squads] deferred portrait refresh resumed");
++    }
++    barOriginal(p);filterBar(p);
++}
++static void __fastcall refreshBarHook(MainBarGUI* p){
++    if(!canRefreshPortraits()){
++        if(!refreshDeferred)logLine("[private-squads] portrait refresh deferred: selected platoon inactive");
++        refreshDeferred=true;return;
++    }
++    refreshDeferred=false;refreshBarOriginal(p);filterBar(p);
++}
++static void repairEmptyManagement(SquadManagementScreen* p) {
++    if(!active()||!p||!localCharacterCount||!world||!world->player)return;
++    __try {
++        // Loading a world clears the visible ItemBox but can retain the same
++        // native factionSize cache. Native update then sees no size change
++        // and never rebuilds it. Refresh only a visible, empty, current-world
++        // panel; keep the native factionSize cache and world roster intact.
++        if(p->faction!=world->player->participant||!p->getVisible()||!p->panelSquads)return;
++        MyGUI::ItemBox* box=p->panelSquads->getItemBox();
++        if(box&&box->getItemCount()==0)refreshManageOriginal(p);
++    }__except(EXCEPTION_EXECUTE_HANDLER){logLine("[private-squads] ERROR management refresh unavailable");}
++}
++static void __fastcall manageHook(SquadManagementScreen* p){manageOriginal(p);repairEmptyManagement(p);filterManage(p);}
++static void __fastcall refreshManageHook(SquadManagementScreen* p){refreshManageOriginal(p);filterManage(p);}
++static void __fastcall cellHook(PortraitMainCellView* p,const MyGUI::IBDrawItemInfo& info,PortraitData* data){
++    cellOriginal(p,info,data);
++    if(active()&&data&&p&&p->mMainWidget){int c=characterClass(data->getCharacter());p->mMainWidget->setVisible(c!=2);}
++}
++static void __fastcall squadCellHook(SquadManagementScreen::PortraitSquadCellView* p,const MyGUI::IBDrawItemInfo& info,PortraitData* data){
++    squadCellOriginal(p,info,data);
++    if(active()&&data&&p&&p->mMainWidget){int c=characterClass(data->getCharacter());p->mMainWidget->setVisible(c!=2);}
++}
++static ActivePlatoon* __fastcall createSquadHook(PlayerInterface* player){
++    ActivePlatoon* squad=createSquadOriginal(player);
++    if(active()&&addSquadDepth&&world&&player==world->player&&squad&&squad->me){
++        createdTabs.insert(squad->me->getHandle());
++        localTabs.insert(squad);
++    }
++    return squad;
++}
++static void __fastcall addSquadHook(SquadManagementScreen* screen,MyGUI::Widget* sender){
++    bool scoped=active()&&world&&world->player&&screen&&screen->faction==world->player->participant;
++    if(scoped)++addSquadDepth;
++    addSquadOriginal(screen,sender);
++    if(scoped)--addSquadDepth;
++    filterManage(screen);
++}
++static void __fastcall selectHook(PlayerInterface* p,RootObject* obj,bool select){
++    if(active()&&select&&characterClass(obj)==2)return;
++    selectOriginal(p,obj,select);
++}
++template<typename T> static bool hook(intptr_t address,void* replacement,T* original){
++    return address&&KenshiLib::AddHook(address,replacement,reinterpret_cast<void**>(original))==KenshiLib::SUCCESS;
++}
++} // privateSquads
++void privateSquadsTick(GameWorld* gw,bool on) {
++    using namespace privateSquads;
++    if(!gw||!on||gw!=world){createdTabs.clear();addSquadDepth=0;}
++    world=gw;enabled=on;mainThread=GetCurrentThreadId();ready=false;localTabs.clear();localCharacterCount=0;firstLocalCharacter=0;
++    if(!gw||!on||!classify)return;
++    Character* cs[160];unsigned int hs[160][5];
++    unsigned int n=snapshotRoster(gw,cs,hs,160);
++    for(unsigned int i=0;i<n;++i){
++        int c=characterClass(static_cast<RootObject*>(cs[i]));
++        if(c){ready=true;if(c==1){++localCharacterCount;if(!firstLocalCharacter)firstLocalCharacter=cs[i];if(g_getPlatoonFn){ActivePlatoon* p=g_getPlatoonFn(cs[i]);if(p)localTabs.insert(p);}}}
++    }
++    for(std::set<hand>::iterator it=createdTabs.begin();it!=createdTabs.end();){
++        hand identity=*it;
++        ActivePlatoon* p=identity.getActivePlatoon();
++        if(p){localTabs.insert(p);ready=true;++it;}else createdTabs.erase(it++);
++    }
++}
++bool installPrivateSquadUiHooks(InvOwnerClassFn owner) {
++    using namespace privateSquads;
++    classify=owner;
++    HMODULE mygui=GetModuleHandleA("MyGUIEngine_x64.dll");
++    removeUiItem=mygui?reinterpret_cast<RemoveUiItemFn>(GetProcAddress(mygui,"?removeItemAt@ItemBox@MyGUI@@QEAAX_K_N@Z")):0;
++    bool ok=removeUiItem!=0;
++    ok=hook(KenshiLib::GetRealAddress(&MainBarGUI::_NV_update),(void*)&barHook,&barOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&MainBarGUI::refreshPortraitTabs),(void*)&refreshBarHook,&refreshBarOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&SquadManagementScreen::update),(void*)&manageHook,&manageOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&SquadManagementScreen::refreshSquads),(void*)&refreshManageHook,&refreshManageOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&PortraitMainCellView::update),(void*)&cellHook,&cellOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&SquadManagementScreen::PortraitSquadCellView::update),(void*)&squadCellHook,&squadCellOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&PlayerInterface::objectSelected),(void*)&selectHook,&selectOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&SquadManagementScreen::onAddSquad),(void*)&addSquadHook,&addSquadOriginal)&&ok;
++    ok=hook(KenshiLib::GetRealAddress(&PlayerInterface::createSquad),(void*)&createSquadHook,&createSquadOriginal)&&ok;
++    logLine(ok?"[private-squads] UI hooks installed":"[private-squads] ERROR one or more UI hooks unavailable");
++    return ok;
++}
++} }
+diff --git a/src/plugin/sync/PrivateSquadSession.h b/src/plugin/sync/PrivateSquadSession.h
+new file mode 100644
+index 0000000..1e20de0
+--- /dev/null
++++ b/src/plugin/sync/PrivateSquadSession.h
+@@ -0,0 +1,78 @@
++#pragma once
++#include "../game/Engine.h"
++#include <windows.h>
++#include <string>
++#include <vector>
++#include <map>
++#include <cstring>
++
++namespace coop {
++namespace savexfer { std::string saveFolderFor(const std::string& name); }
++// Main-thread save adapter. Ownership is recorded from the HOST's perspective
++// and restored onto each client's current native hand, ignoring local indices.
++// Pin restoration must precede publishOwned, whose normal census can otherwise
++// assign a newly created tab to the wrong initial sorted rank after a reload.
++class PrivateSquadSession {
++    struct Row { unsigned int container,serial,body,hostOwn; };
++    typedef std::vector<Row> Rows;
++    std::map<std::string,Rows> frozen_;
++    bool restored_,blocked_;
++    std::string restoredName_;
++    static bool safeName(const std::string& n){return !n.empty()&&n!="."&&n!=".."&&n.find_first_of("/\\:")==std::string::npos;}
++    static void put(std::vector<unsigned char>& out,unsigned int n){for(int i=0;i<4;++i)out.push_back((unsigned char)(n>>(8*i)));}
++    static unsigned int get(const std::vector<unsigned char>& in,unsigned int at){unsigned int n=0;for(int i=0;i<4;++i)n|=(unsigned int)in[at+i]<<(8*i);return n;}
++    static unsigned int checksum(const std::vector<unsigned char>& bytes,unsigned int n){unsigned int h=2166136261u;for(unsigned int i=0;i<n;++i){h^=bytes[i];h*=16777619u;}return h;}
++    static bool same(const Row& a,const Row& b){return a.container==b.container&&a.serial==b.serial&&a.body==b.body;}
++    static Row row(const EntityState& e,unsigned int own){Row r;r.container=e.hContainer;r.serial=e.hContainerSerial;r.body=e.hSerial;r.hostOwn=own;return r;}
++    static bool unique(const Rows& rows){for(unsigned int i=0;i<rows.size();++i){if(rows[i].hostOwn>1)return false;for(unsigned int j=0;j<i;++j)if(same(rows[i],rows[j]))return false;}return true;}
++    static std::vector<unsigned char> encode(const Rows& rows){
++        const unsigned char magic[8]={'K','C','S','Q','0','0','1',0};
++        std::vector<unsigned char> bytes(magic,magic+8);put(bytes,(unsigned int)rows.size());
++        for(unsigned int i=0;i<rows.size();++i){put(bytes,rows[i].container);put(bytes,rows[i].serial);put(bytes,rows[i].body);put(bytes,rows[i].hostOwn);}
++        put(bytes,checksum(bytes,(unsigned int)bytes.size()));return bytes;
++    }
++    static bool decode(const std::vector<unsigned char>& bytes,Rows& rows){
++        const unsigned char magic[8]={'K','C','S','Q','0','0','1',0};
++        if(bytes.size()<16||memcmp(&bytes[0],magic,8))return false;
++        unsigned int n=get(bytes,8);if(n>160||bytes.size()!=16+16*n)return false;
++        if(get(bytes,(unsigned int)bytes.size()-4)!=checksum(bytes,(unsigned int)bytes.size()-4))return false;
++        Rows parsed;for(unsigned int i=0;i<n;++i){unsigned int p=12+16*i;Row r;r.container=get(bytes,p);r.serial=get(bytes,p+4);r.body=get(bytes,p+8);r.hostOwn=get(bytes,p+12);parsed.push_back(r);}
++        if(!unique(parsed))return false;rows.swap(parsed);return true;
++    }
++public:
++    PrivateSquadSession():restored_(false),blocked_(false){}
++    void resetWorld(){restored_=blocked_=false;restoredName_.clear();frozen_.clear();}
++    bool blocked()const{return blocked_;}
++    bool restored()const{return restored_;}
++    template<class Repl> bool capture(GameWorld* gw,Repl& repl,const std::string& name){
++        frozen_.erase(name);if(!safeName(name)||!gw)return false;
++        EntityState members[160];unsigned int n=engine::captureSquad(gw,false,members,160);if(!n||n>160)return false;
++        Rows rows;for(unsigned int i=0;i<n;++i){unsigned int h[5]={members[i].hType,members[i].hContainer,members[i].hContainerSerial,members[i].hIndex,members[i].hSerial};int owner=repl.ownerClassForHand(h);if(owner!=1&&owner!=2)return false;rows.push_back(row(members[i],owner==1?1:0));}
++        if(!unique(rows))return false;frozen_[name]=rows;return true;
++    }
++    bool save(const std::string& name){
++        if(!safeName(name)||frozen_.find(name)==frozen_.end())return false;
++        std::vector<unsigned char> data=encode(frozen_[name]);std::string folder=savexfer::saveFolderFor(name);CreateDirectoryA(folder.c_str(),0);
++        std::string path=folder+"\\coop_squads.dat",tmp=path+".tmp";
++        HANDLE f=CreateFileA(tmp.c_str(),GENERIC_WRITE,0,0,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);if(f==INVALID_HANDLE_VALUE)return false;
++        DWORD written=0;bool ok=WriteFile(f,&data[0],(DWORD)data.size(),&written,0)!=0&&written==data.size()&&FlushFileBuffers(f)!=0;CloseHandle(f);
++        if(ok)ok=MoveFileExA(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;if(!ok)DeleteFileA(tmp.c_str());return ok;
++    }
++    // True: absent legacy sidecar, or validated complete restoration. False:
++    // native roster not complete yet (retry), or invalid file (blocked=true).
++    // Validate ALL bytes and ALL identities before mutating even one pin.
++    template<class Repl> bool restore(GameWorld* gw,Repl& repl,const std::string& name,bool isHost){
++        if(blocked_)return false;if(restored_)return restoredName_==name;if(!safeName(name)||!gw)return false;
++        std::string path=savexfer::saveFolderFor(name)+"\\coop_squads.dat";
++        DWORD attr=GetFileAttributesA(path.c_str());if(attr==INVALID_FILE_ATTRIBUTES){DWORD err=GetLastError();if(err!=ERROR_FILE_NOT_FOUND&&err!=ERROR_PATH_NOT_FOUND)return false;restored_=true;restoredName_=name;return true;}
++        HANDLE f=CreateFileA(path.c_str(),GENERIC_READ,FILE_SHARE_READ,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);if(f==INVALID_HANDLE_VALUE)return false;
++        DWORD high=0,size=GetFileSize(f,&high);std::vector<unsigned char> bytes;bool ok=!high&&size>=16&&size<=2576;DWORD got=0;
++        if(ok){bytes.resize(size);ok=ReadFile(f,&bytes[0],size,&got,0)!=0&&got==size;}CloseHandle(f);
++        Rows rows;if(!ok||!decode(bytes,rows)){blocked_=true;return false;}
++        EntityState current[160];unsigned int n=engine::captureSquad(gw,false,current,160);if(n>160||(!n&&!rows.empty()))return false;
++        std::vector<unsigned int> matches;for(unsigned int i=0;i<rows.size();++i){unsigned int match=160,count=0;for(unsigned int j=0;j<n;++j)if(same(rows[i],row(current[j],0))){match=j;++count;}if(count!=1)return false;matches.push_back(match);}
++        for(unsigned int i=0;i<rows.size();++i){const EntityState& e=current[matches[i]];unsigned int h[5]={e.hType,e.hContainer,e.hContainerSerial,e.hIndex,e.hSerial};repl.restorePrivateOwner(h,isHost?(rows[i].hostOwn!=0):(rows[i].hostOwn==0));}
++        restored_=true;restoredName_=name;return true;
++    }
++};
++}
+diff --git a/src/plugin/sync/SeparateWallet.h b/src/plugin/sync/SeparateWallet.h
+new file mode 100644
+index 0000000..997b6be
+--- /dev/null
++++ b/src/plugin/sync/SeparateWallet.h
+@@ -0,0 +1,25 @@
++#pragma once
++
++// Two fixed player slots, independent of ephemeral transport peer IDs.
++// Engine wallet changes are deltas authored by the local player, not a second
++// copy of a shared total. Pure arithmetic so persistence/network tests can use
++// exactly the production ledger without loading the engine.
++namespace coop {
++class SeparateWallet {
++public:
++    SeparateWallet() : host(0), guest(0), ack(0), epoch(0) {}
++    int host, guest;
++    unsigned int ack, epoch;
++    static int bounded(__int64 value) {
++        return value < 0 ? 0 : value > 2147483647 ? 2147483647 : (int)value;
++    }
++    void seed(int total) {
++        if (total < 0) total = 0;
++        guest = total / 2; host = total - guest; ack = 0;
++    }
++    bool fold(unsigned int incomingEpoch, unsigned int sequence, int delta) {
++        if (!epoch || incomingEpoch != epoch || sequence != ack + 1) return false;
++        guest = bounded((__int64)guest + delta); ack = sequence; return true;
++    }
++};
++}
+diff --git a/src/plugin/sync/SeparateWalletSession.h b/src/plugin/sync/SeparateWalletSession.h
+new file mode 100644
+index 0000000..8fc5add
+--- /dev/null
++++ b/src/plugin/sync/SeparateWalletSession.h
+@@ -0,0 +1,153 @@
++#pragma once
++#include "SeparateWallet.h"
++#include <cstdio>
++
++// Main-thread adapter. Persists both fixed slots INSIDE the coordinated save,
++// which SaveXfer includes in fingerprints, transfer, and atomic folder commit.
++namespace coop {
++class SeparateWalletSession {
++    struct Pending { unsigned int seq; int delta; Pending(unsigned int s, int d):seq(s),delta(d){} };
++    SeparateWallet ledger_;
++    std::deque<Pending> pending_;
++    bool ready_, blocked_;
++    int seen_;
++    unsigned int seq_;
++    unsigned long sentMs_;
++    bool dirty_;
++    __int64 earlyDelta_;
++    std::map<std::string,SeparateWallet> frozen_;
++    unsigned int checksum(int a,int b) const {
++        unsigned int h=2166136261u;
++        for(int k=0;k<8;++k){unsigned int v=(unsigned int)(k<4?a:b);h^=(v>>((k%4)*8))&255;h*=16777619u;}
++        return h;
++    }
++    bool safeName(const std::string& n) const {
++        return !n.empty() && n!="." && n!=".." && n.find_first_of("/\\:") == std::string::npos;
++    }
++    void send(NetLink& net,u32 id) {
++        MoneyPacket p; memset(&p,0,sizeof(p));p.type=PKT_MONEY;p.ownerId=id;
++        p.money=ledger_.guest;p.ackSeq=ledger_.ack;p.mode=1;p.epoch=ledger_.epoch;
++        net.queueMoney(p);sentMs_=GetTickCount();dirty_=false;
++    }
++    bool initializeHost(GameWorld* gw) {
++        int cur=-1;if(!engine::readPlayerWallet(gw,&cur)||cur<0)return false;
++        char name[64]={0};engine::saveInfo(name,sizeof(name),0,0);
++        std::string folder=savexfer::saveFolderFor(name);
++        std::string file=folder+"\\coop_wallets.dat";
++        DWORD attr=GetFileAttributesA(file.c_str());
++        if(attr!=INVALID_FILE_ATTRIBUTES){
++            FILE* f=fopen(file.c_str(),"rb");char data[160]={0};
++            size_t count=f?fread(data,1,sizeof(data)-1,f):0;if(f)fclose(f);
++            int a=-1,b=-1,end=0;unsigned int sum=0;
++            if(!count||sscanf(data,"KCOOP_WALLETS_1 %d %d %u %n",&a,&b,&sum,&end)!=3 ||
++                a<0||b<0||data[end]!='\0'||sum!=checksum(a,b)){
++                blocked_=true;logLine("[wallet-private] ERROR invalid sidecar; restore a wallet backup before playing");return false;
++            }
++            ledger_.host=a;ledger_.guest=b;
++        }else{
++            ledger_.seed(cur); // migrate once; conserve the original shared total
++        }
++        // Never reuse an epoch within this process, even after loading the same save.
++        static unsigned int nonce=0;
++        if(!nonce)nonce=GetTickCount() ^ GetCurrentProcessId();
++        ledger_.epoch=++nonce;if(!ledger_.epoch)ledger_.epoch=++nonce;
++        ledger_.ack=0;
++        if(!engine::writePlayerWallet(gw,ledger_.host))return false;
++        seen_=ledger_.host;ready_=true;dirty_=true;
++        char msg[160];_snprintf(msg,sizeof(msg)-1,"[wallet-private] READY host=%d guest=%d epoch=%u",ledger_.host,ledger_.guest,ledger_.epoch);msg[sizeof(msg)-1]=0;logLine(msg);
++        return true;
++    }
++public:
++    SeparateWalletSession():ready_(false),blocked_(false),seen_(-1),seq_(0),sentMs_(0),dirty_(true),earlyDelta_(0){}
++    void resetWorld(bool host){
++        ready_=false;blocked_=false;seen_=-1;sentMs_=0;dirty_=true;earlyDelta_=0;frozen_.clear();
++        // A reconnect bootstrap reloads the guest's world while the host epoch
++        // survives. Retain unacknowledged operations until the next snapshot
++        // tells us whether this is that same epoch or an intentional rollback.
++        if(host){seq_=0;pending_.clear();ledger_=SeparateWallet();}
++    }
++    void peerConnected(){dirty_=true;}
++    bool readyForSave() const { return ready_ && !blocked_ && pending_.empty() && earlyDelta_==0; }
++    void capture(GameWorld* gw,const std::string& name){
++        if(!ready_&&!blocked_)initializeHost(gw);
++        if(!ready_||blocked_)return;
++        int cur=-1;if(engine::readPlayerWallet(gw,&cur)&&cur>=0){ledger_.host=cur;seen_=cur;}
++        frozen_[name]=ledger_;
++    }
++    bool save(const std::string& name) {
++        if(!ready_||blocked_||!safeName(name)||frozen_.find(name)==frozen_.end())return false;
++        const SeparateWallet& captured=frozen_[name];
++        std::string folder=savexfer::saveFolderFor(name);
++        CreateDirectoryA(folder.c_str(),0);
++        std::string path=folder+"\\coop_wallets.dat",tmp=path+".tmp";
++        char data[160];int n=_snprintf(data,sizeof(data),"KCOOP_WALLETS_1 %d %d %u\n",captured.host,captured.guest,checksum(captured.host,captured.guest));
++        HANDLE f=CreateFileA(tmp.c_str(),GENERIC_WRITE,0,0,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);
++        if(f==INVALID_HANDLE_VALUE)return false;
++        DWORD written=0;bool ok=WriteFile(f,data,n,&written,0)!=0 && written==(DWORD)n && FlushFileBuffers(f)!=0;
++        CloseHandle(f);
++        if(ok)ok=MoveFileExA(tmp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
++        if(!ok)DeleteFileA(tmp.c_str());
++        return ok;
++    }
++    void tick(GameWorld* gw,Inbound& in,NetLink& net,u32 id,bool host) {
++        if(blocked_)return;
++        if(host&&!ready_&&!initializeHost(gw))return;
++        int cur=-1;if(!engine::readPlayerWallet(gw,&cur)||cur<0)return;
++        std::deque<InboundMoney> totals;std::deque<InboundMoneyDelta> deltas;
++        in.drainMoney(totals);in.drainMoneyDeltas(deltas);
++        if(host){
++            // Guest operations never touch this engine wallet.
++            if(cur!=seen_){ledger_.host=cur;seen_=cur;dirty_=true;}
++            for(std::deque<InboundMoneyDelta>::iterator it=deltas.begin();it!=deltas.end();++it){
++                if(ledger_.fold(it->pkt.epoch,it->pkt.seq,it->pkt.delta)){
++                    dirty_=true;
++                    char msg[160];_snprintf(msg,sizeof(msg)-1,"[wallet-private] GUEST seq=%u delta=%d host=%d guest=%d",ledger_.ack,it->pkt.delta,ledger_.host,ledger_.guest);msg[sizeof(msg)-1]=0;logLine(msg);
++                }
++            }
++            if(dirty_||GetTickCount()-sentMs_>=1000)send(net,id);
++            return;
++        }
++        // A freshly loaded native wallet belongs to the host. Until the first
++        // authenticated guest snapshot arrives, expose zero rather than let the
++        // guest spend the host's cats. Preserve any real early earnings.
++        if(!ready_){
++            if(seen_<0){if(!engine::writePlayerWallet(gw,0))return;cur=seen_=0;}
++            earlyDelta_+=(__int64)cur-seen_;seen_=cur;
++        }
++        // Do not interpret a freshly loaded host wallet as a guest purchase.
++        // First receive establishes the guest balance and the ACK sequence floor.
++        if(ready_&&cur!=seen_){
++            int d=cur-seen_;seen_=cur;pending_.push_back(Pending(++seq_,d));
++            MoneyDeltaPacket p;memset(&p,0,sizeof(p));p.type=PKT_MONEY_DELTA;p.ownerId=id;p.seq=seq_;p.delta=d;p.epoch=ledger_.epoch;net.queueMoneyDelta(p);
++        }
++        if(totals.empty())return;
++        const MoneyPacket& p=totals.back().pkt;
++        if(p.mode!=1||!p.epoch||p.money<0){logLine("[wallet-private] ERROR peer wallet mode mismatch");return;}
++        if(!ready_||p.epoch!=ledger_.epoch){
++            if(p.epoch!=ledger_.epoch){pending_.clear();seq_=p.ackSeq;}
++            ledger_.epoch=p.epoch;if(seq_<p.ackSeq)seq_=p.ackSeq;ready_=true;
++            char msg[160];_snprintf(msg,sizeof(msg)-1,"[wallet-private] GUEST READY money=%d epoch=%u ack=%u",p.money,p.epoch,p.ackSeq);msg[sizeof(msg)-1]=0;logLine(msg);
++            if(earlyDelta_){
++                int d=earlyDelta_>2147483647?2147483647:earlyDelta_<-2147483647?-2147483647:(int)earlyDelta_;
++                pending_.push_back(Pending(++seq_,d));
++                MoneyDeltaPacket delta;memset(&delta,0,sizeof(delta));delta.type=PKT_MONEY_DELTA;delta.ownerId=id;delta.seq=seq_;delta.delta=d;delta.epoch=ledger_.epoch;net.queueMoneyDelta(delta);earlyDelta_=0;
++            }
++        }
++        if(p.ackSeq>seq_)seq_=p.ackSeq;
++        while(!pending_.empty()&&pending_.front().seq<=p.ackSeq)pending_.pop_front();
++        // Reliability ends with the old ENet connection. Replay outstanding
++        // operations after a reconnect; the host's exact-next sequence guard
++        // rejects duplicates and preserves their original ordering.
++        if(!pending_.empty() && GetTickCount()-sentMs_>=500){
++            for(std::deque<Pending>::iterator it=pending_.begin();it!=pending_.end();++it){
++                MoneyDeltaPacket resend;memset(&resend,0,sizeof(resend));resend.type=PKT_MONEY_DELTA;resend.ownerId=id;resend.seq=it->seq;resend.delta=it->delta;resend.epoch=ledger_.epoch;net.queueMoneyDelta(resend);
++            }
++            sentMs_=GetTickCount();
++        }
++        __int64 want=p.money;
++        for(std::deque<Pending>::iterator it=pending_.begin();it!=pending_.end();++it)want+=it->delta;
++        int target=SeparateWallet::bounded(want);
++        if(cur==target||engine::writePlayerWallet(gw,target))seen_=target;
++    }
++};
++}

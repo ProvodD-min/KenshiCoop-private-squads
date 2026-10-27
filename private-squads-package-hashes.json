@@ -1,0 +1,22 @@
+{
+  "KenshiCoop-private-squads.zip": {
+    "sha256": "b41cbb60557b90dbd7aabdc19e036d19930a6a5254bde13c687aa5f5017f0dae",
+    "bytes": 4058850
+  },
+  "KenshiCoop-private-squads-source.zip": {
+    "sha256": "405aeac9c00bf721d37293b868e2c03397e9b4ace29ae0131b4292181f35f1aa",
+    "bytes": 3660777
+  },
+  "kenshi-private-squads.patch": {
+    "sha256": "710228d3d41eadcbed6436ee72281367aa9763b273200e3aa1ebbac473c9694f",
+    "bytes": 144598
+  },
+  "private-squads-test-results.json": {
+    "sha256": "644b9925be95776d11f41455417ba4aba05e470d30a91b5308378eafc96836c6",
+    "bytes": 25605
+  },
+  "\u0421\u0432\u043e\u0438-\u043e\u0442\u0440\u044f\u0434\u044b.md": {
+    "sha256": "64d8c164e412d5bbd942fd094f8fc036638840e989bb051fb1b57d8ef239bbcf",
+    "bytes": 5793
+  }
+}

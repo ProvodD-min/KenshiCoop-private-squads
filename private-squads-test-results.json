@@ -1,0 +1,608 @@
+{
+  "date": "2026-10-27",
+  "protocol": 56,
+  "base_commit": "5a761e19a4184b42315e96ea7e92e3c1403d54db",
+  "dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
+  "native_recruit_router": "14/14 PASS; ownership-filter mutation rejected (3 failures)",
+  "native_squad_session": "23/23 PASS; checksum/role mutation rejected (2 failures)",
+  "native_peer_squad_alias": "15/15 PASS; wrong handle-field and default-squad mutations rejected (8 failures each)",
+  "native_wallet_ledger": "26/26 PASS",
+  "native_wallet_session": "20/20 PASS",
+  "protocol_checks": "523/523 PASS (prior v56 regression run)",
+  "core_real_clients": {
+    "RESULT": "PASS",
+    "assertions": [
+      {
+        "assert": "exact_two_test_processes",
+        "pass": true
+      },
+      {
+        "assert": "unique_owner_classifier_in_build_map",
+        "pass": true
+      },
+      {
+        "assert": "owner_classifier_rva_in_image",
+        "pass": true
+      },
+      {
+        "assert": "isolated_image_host",
+        "pass": true
+      },
+      {
+        "assert": "isolated_image_join",
+        "pass": true
+      },
+      {
+        "assert": "same_plugin_on_both_clients",
+        "pass": true
+      },
+      {
+        "assert": "loaded_plugin_matches_map_build",
+        "pass": true
+      },
+      {
+        "assert": "two_populated_native_squads",
+        "pass": true
+      },
+      {
+        "assert": "initial_native_owner_partition",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_host_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "initial_ui_join_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "initial_selection_host_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "initial_selection_host_own_selection_works",
+        "pass": true
+      },
+      {
+        "assert": "initial_selection_join_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "initial_selection_join_own_selection_works",
+        "pass": true
+      },
+      {
+        "assert": "shared_native_npc_available_join",
+        "pass": true
+      },
+      {
+        "assert": "native_recruit_success_join",
+        "pass": true
+      },
+      {
+        "assert": "recruit_final_native_container_join",
+        "pass": true
+      },
+      {
+        "assert": "no_duplicate_body_join_host",
+        "pass": true
+      },
+      {
+        "assert": "no_duplicate_body_join_join",
+        "pass": true
+      },
+      {
+        "assert": "shared_native_npc_available_host",
+        "pass": true
+      },
+      {
+        "assert": "native_recruit_success_host",
+        "pass": true
+      },
+      {
+        "assert": "recruit_final_native_container_host",
+        "pass": true
+      },
+      {
+        "assert": "no_duplicate_body_host_host",
+        "pass": true
+      },
+      {
+        "assert": "no_duplicate_body_host_join",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_host_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "recruited_ui_join_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "recruited_selection_host_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "recruited_selection_host_own_selection_works",
+        "pass": true
+      },
+      {
+        "assert": "recruited_selection_join_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "recruited_selection_join_own_selection_works",
+        "pass": true
+      },
+      {
+        "assert": "recruiting_preserves_private_wallets",
+        "pass": true
+      },
+      {
+        "assert": "fresh_test_save_name",
+        "pass": true
+      },
+      {
+        "assert": "save_hashes_stable",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_host_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_native_owner",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_tab_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_portrait_owned_container",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_portrait_owned_classifier",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_one_visible_tab",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_ui_join_portrait_count",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_selection_host_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_selection_host_own_selection_works",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_selection_join_peer_selection_blocked",
+        "pass": true
+      },
+      {
+        "assert": "reloaded_selection_join_own_selection_works",
+        "pass": true
+      }
+    ],
+    "scope": "Two real clients: native guest/host recruitment, private tabs/portraits, selection ownership, matching complete save, wallet preservation and loaded-world ownership/UI."
+  },
+  "management_real_clients": {
+    "RESULT": "PASS",
+    "dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
+    "scope": [
+      "native own empty squads visible only in owner management",
+      "native moves on both clients",
+      "five bodies preserved with 3host/2join ownership",
+      "visible native groups and management contain only local members",
+      "coordinated save trees byte-identical",
+      "membership partitions preserved through shared save/reload",
+      "retained visible management automatically repopulated after reload",
+      "wallets unchanged2743host/1019join"
+    ],
+    "assertions": 75,
+    "assertions_passed": 75,
+    "inventory_preservation": {
+      "RESULT": "PASS",
+      "dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
+      "scope": "SID/quantity/nesting inventory comparison by unique character name across native squad moves/save/reload. Ignores item keys/pointers/order/localized item names; does not test item condition/charges/equipment slot.",
+      "checks": [
+        {
+          "assertion": "host inventories unchanged across save/reload",
+          "passed": true,
+          "characters": 5,
+          "items_including_nested": 28
+        },
+        {
+          "assertion": "join inventories unchanged across save/reload",
+          "passed": true,
+          "characters": 5,
+          "items_including_nested": 28
+        },
+        {
+          "assertion": "clients agree before",
+          "passed": true
+        },
+        {
+          "assertion": "clients agree after",
+          "passed": true
+        }
+      ],
+      "evidence_sha256": "11d84311c5061fca9328c70e35131c402666e93dd9d88f92ce74307af4c926c1"
+    },
+    "coordinated_save": {
+      "files": 52,
+      "sha256": {
+        "coop_squads.dat": "e1dfeb2dc02d3e2100f88740561d512aa5702a54d0d146e7fb7c9527873b693b",
+        "coop_wallets.dat": "f55c225bcefe44c3fec208f5966a01a5ee70ccba2fa47e656b4b26ecc0c76868",
+        "portraits_texture.png": "f459c2d2036493b6674656f9c430f8c38e0200867aaac67291b9454a550aafa0",
+        "quick.save": "2184d3af46f7fa08e56f6da51122355710ff181baa484e920b6604a9e3a120bc",
+        "platoon/Drifters_0.platoon": "a86d7a64ceca7eefd354f83978779230ef69d1ee6d4b2683ed037bdc493031ec",
+        "platoon/Drifters_2.platoon": "404f6498aeb66c387f84a7e6f1df249bc9e4a79f1f0ffb59d7e6314ca6ebd955",
+        "platoon/Dust Bandits_0.platoon": "0f22f1b0886679dbd0caf201f86f32607104d67ade86f7e0b7ab4345de7c8653",
+        "platoon/Dust Bandits_6.platoon": "e0cd2c293e7fa3827fabfbde29611a6a4c034898bf3973b30ffc3c97f5f2500f",
+        "platoon/Herbivore_1.platoon": "e9ccd022398ace8cc0b0d207c91628e0a3bc758c7efe5b00b968837bc3233f60",
+        "platoon/Holy Nation Outlaws_22.platoon": "102ddbc427f646dcb15bd57d5db806fe28d710e4a1f59cad6310c2c552b7218f",
+        "platoon/Holy Nation Outlaws_3.platoon": "488468e76b56e0253e761765175bd10c51a7ad7f723bd3f746d9ada21d70217a",
+        "platoon/Holy Nation Outlaws_4.platoon": "0532fd4cf83a1f776e6eb9497b8641aafcc7e1ae484c0fb34d6ce8befb1a010a",
+        "platoon/Holy Nation Outlaws_7.platoon": "c68aec8deedfd7f436e5ea524d7b3488d6c915d1caff7a50ed96d35bef255ee6",
+        "platoon/Hounds_0.platoon": "953eca511d30a2fb41c01937aa62ea5bd083c2c8985509bb27ff293edb1d8918",
+        "platoon/Nameless_0.platoon": "bdb270c8d654ec1aeacebb6aa8c10a0264ed256a42a2ff61148dc6e41e8be57e",
+        "platoon/Nameless_1.platoon": "c535f54550b01deab3dfb9fc958f3d17aad4d705be9a3dabc678ede38612b470",
+        "platoon/Nameless_2.platoon": "b791403de6569cd64b8c6b3eb0fbb666ba8c46e0903876d77cca5f7266ecad47",
+        "platoon/Nameless_3.platoon": "3c4972272df68dc9e947a2a98925280d14d10fdfa7538a2cfb77a1f0a6c1da80",
+        "platoon/Nameless_4.platoon": "97b9713e490307b205193ebb7f82654e9bd2b0e070193a1c7d61ed5597653464",
+        "platoon/Nomads_2.platoon": "ee9016ac878e901debb48ccce5216906c8b27ee690ffa46f737f60657615568f",
+        "platoon/Shinobi Thieves_0.platoon": "4ca3eb9f69a066a78ffd095e5e75b15a0280fe2a0b3fbae1f88e926fe27f2631",
+        "platoon/Shinobi Thieves_1.platoon": "e99d682d355ab4e14ec26f4c5c7f2c2c1dd0a2afc81b4efd009987a0d272b859",
+        "platoon/Slave Traders_4.platoon": "babfcfbce9ab0159a37c31ce0786f95481fb54e962c00c834d27970bbc0ae2be",
+        "platoon/Starving Bandits_0.platoon": "c9945beebb78b451e2860bc41876df498b396ed7682cee1ed955e955c49ca419",
+        "platoon/Starving Bandits_1.platoon": "e58fb03a4caca4d3d510a20d72bbf153afeb5fe28cf711cf0ab844a2f62e0f76",
+        "platoon/Starving Bandits_2.platoon": "eea41491dbd6c01d690e078e614052d6da62b110e1573949d90754def8e1acba",
+        "platoon/Starving Bandits_3.platoon": "537918fbb5dc41eac7d35652366ba89e0ff6b834cade1bd5a4013328a5041312",
+        "platoon/Starving Bandits_4.platoon": "57b806245656ebc00c6cfd3bc03c7052af5ad2370dac6fe79ff739dd129b96b0",
+        "platoon/Tech Hunters_1.platoon": "dd40c49483e9b248b0626bb9ee1b440722387f0a83410f3723af68fcf9f9671a",
+        "platoon/Tech Hunters_2.platoon": "f10bda1fb6c8e762d5b3860825bfc7266e07ff108ee33226b2751d557abd4dad",
+        "platoon/Tech Hunters_3.platoon": "7b1a1ccaecbadac07395b8e89a58dde6408afbef547ba0c8192771ad21ce8da7",
+        "platoon/Tech Hunters_4.platoon": "1b71318d7e9ff9d44a6b98f1d78a87b67475ec3335a536ff559dc4d6c597ef5e",
+        "platoon/Tech Hunters_6.platoon": "220133b4325ba0b609da30b55382b818523a94751ccb5ea589377a3fa896276a",
+        "platoon/Tech Hunters_9.platoon": "08266aca7d90c1e9f0044d8903c53487001171a1117e42847531426c577bb9cd",
+        "platoon/Trade Ninjas_0.platoon": "571f57fe88e30ec3ea95177af546cb7793fa8cef3f5dbe8f39c59152d93d79d9",
+        "platoon/Trade Ninjas_1.platoon": "988da7fd432b810caabac43063132c69cfaf1edb845809a5858fc1cdb407c639",
+        "platoon/Wolves_0.platoon": "00ae2b329f599e775ccb9ff06e7ca6bc8dfb74afd70a13c7a7556f8868c597b7",
+        "platoon/Wolves_1.platoon": "e0ce472c845878fc1f8f47299d86dc68fe8b7417054fb0213126f16625288ec3",
+        "platoon/Wolves_4.platoon": "4913137bd28a1ea73250b8323d4daa06cee9ea8c6d8cda882fad28f608e0cd63",
+        "platoon/Wolves_5.platoon": "c999376b2fd946465d76e8a687a1b15473a38a89037d3491fc9a4111173766b3",
+        "platoon/Wolves_6.platoon": "f15fe2e0caf53f89e787bc219b932d5655ffe58ac54c2bc1f351f0ea302a0067",
+        "platoon/Голодные бандиты_5.platoon": "afd935950ab99b7b59398c844df39ef75638df871384350606292d7d088a52c9",
+        "platoon/Изгои Святой Нации_24.platoon": "8e26bdeaae23b666359885f8456464aef2c73a6ddb41b1885dcb67e235ec9b8a",
+        "platoon/Пыльные бандиты_197.platoon": "a754011304bcfb646fe5612cf29091d3ae23b5a3b7af374160d3c993328c4db5",
+        "platoon/Пыльные бандиты_200.platoon": "66ebf7d4c49c17e4567cf977631be0327dd3c10019a09a0437a6fb0ece1510fd",
+        "platoon/Травоядные_7.platoon": "95b4cc4762540c7d7d1ddc6ec1c2cb101a7312fa374772c60ace17923b8bec6d",
+        "platoon/Травоядные_9.platoon": "7f5c3e6a864f8be1d50a6a398add41a6656841e9d1aaf9932e49e800dee0f80a",
+        "zone/zone.19.31.zone": "ef06593217f614dfb60ede1a9abec9e2af4174bb9762636da43b807f67af8024",
+        "zone/zone.20.32.zone": "8eca256e814a9496b32ca13451f51b2da16229b030ba749f6c57bd1b24054f38",
+        "zone/zone.20.33.zone": "320b50daccfd5a6294ab9eb316b4770205989609b111163c1f82ba30778ef753",
+        "zone/zone.21.31.zone": "12c56a31e9363c8fbcfa567b6227bbfcd5acc9a25a154310e585c072d5eb17b7",
+        "zone/zone.21.32.zone": "dbff22280244fd9319ea9889dfd34d276c15d0d62b7bf9df19c1fb6e76c205dd"
+      }
+    },
+    "private_evidence_sha256": "86eeb7d73e96a874f4896ea468460bbd683221f68a00d94add07c0b3f3e1c40a"
+  },
+  "limits": [
+    "Two fixed host/guest slots. Ownership is not bound to Steam accounts.",
+    "Only populated native squads have durable body ownership records. Empty squad ownership is session-local.",
+    "A newly created guest squad label can be renumbered after host save/reload; its members and ownership persist.",
+    "Guest-requested wallet saves wait for wallet ACK; host saves still have no global inventory/purchase barrier.",
+    "External WAN/NAT/Steam P2P, long campaigns and broad third-party mod compatibility remain untested.",
+    "Earlier RE_Kenshi null-player focus crash is unresolved; no Frida guard is included."
+  ],
+  "prior_inventory_preservation": {
+    "RESULT": "PASS",
+    "dll_sha256": "3845eb74825124416950d0750efe419dc5fa65ffd0ece7f72896734c14cf84e2",
+    "scope": "Read-only normalized SID/quantity/nesting comparison by unique character name across native squad moves, save and reload. Ignores item pointers/keys, character handles, inventory order, localized item names. Does not compare item condition, equipment slot or charges.",
+    "checks": 4,
+    "characters_per_client": 5,
+    "items_including_nested_per_client": 24,
+    "private_evidence_sha256": "a628880a61353fa6d60c12b0a37a6a6af3fd465875864875f526848ac68390b3"
+  },
+  "coordinated_save": {
+    "files": 50,
+    "sha256": {
+      "coop_squads.dat": "f9748467757ab4f765aa81a95f1c450c4a65be4ed5d588eda878ad4313aa33ad",
+      "coop_wallets.dat": "f55c225bcefe44c3fec208f5966a01a5ee70ccba2fa47e656b4b26ecc0c76868",
+      "portraits_texture.png": "fbf302b5a5ad538a89151787e4858c4857a6d478b20ad1c6d97e4c7b3fdb64e2",
+      "quick.save": "0f2628e21f11c8c2b1e2b98f67f1d60f88695b9b6b7f974dfbb02d93d6e490f5",
+      "platoon/Drifters_0.platoon": "46a3b64b31ffe288891ce977c087c1dff7515414e470b97d04470ecf181073f2",
+      "platoon/Drifters_2.platoon": "ec9de9db4c926fd3d8ca6d40e39133994511e0b531f1ee10e569c92087cf8ec0",
+      "platoon/Dust Bandits_0.platoon": "d05d4aea11e846ba1c5cf990415db30e4758ac00f86d419a930ef024df6a2733",
+      "platoon/Dust Bandits_6.platoon": "04a8983d665ef4f096033f5b7be78ce420f6c9d471f157a617e16aff48ac7083",
+      "platoon/Herbivore_1.platoon": "e9ccd022398ace8cc0b0d207c91628e0a3bc758c7efe5b00b968837bc3233f60",
+      "platoon/Holy Nation Outlaws_22.platoon": "102ddbc427f646dcb15bd57d5db806fe28d710e4a1f59cad6310c2c552b7218f",
+      "platoon/Holy Nation Outlaws_3.platoon": "6090e7bb344f7f17590ee670d2a0f4e3a24d4443398ad10588a18389344f97de",
+      "platoon/Holy Nation Outlaws_4.platoon": "c519fb851e64da42295c70b2d9aa4bf7be37d1470d6343da15c20daf308a544f",
+      "platoon/Holy Nation Outlaws_7.platoon": "9883cec5cd65b4b4d7386ae9c547dfe1e93292567beb5e8af7d78eba188592d4",
+      "platoon/Hounds_0.platoon": "7c197a49745823a65ef949d35789e2547f9ecf3b35a2d10fca1ac533c3eb1f76",
+      "platoon/Nameless_0.platoon": "043a2190407c902b5217b456a5ee9d3675f9b3b2abda30bbdca79ddc573b9973",
+      "platoon/Nameless_1.platoon": "8f5d56afcb72001bce23987428db1326ae7e78c71f6cbbae28905042646226e9",
+      "platoon/Nameless_2.platoon": "64a54523a86f0ee8ea844cb0a1dcf94ae0fe11282f540f55d455c120475e246b",
+      "platoon/Nomads_2.platoon": "8be53b70f304f107bf07044114fc3db091327261d49380f9444ba32afdcd0e2a",
+      "platoon/Shinobi Thieves_0.platoon": "4ca3eb9f69a066a78ffd095e5e75b15a0280fe2a0b3fbae1f88e926fe27f2631",
+      "platoon/Shinobi Thieves_1.platoon": "3fa43f07e7bf70ab18631c2909be2e89e87f32c890e8d1b73008e0029416b579",
+      "platoon/Slave Traders_4.platoon": "1f462ccb4eec1827c7ac4b9a81e74ece402420b3724a1d681b6fa1c7d507e43e",
+      "platoon/Starving Bandits_0.platoon": "9a0c209a6fa5abe7367fe4beb46dd4dfb45ce6636373619d8bf747b29273d574",
+      "platoon/Starving Bandits_1.platoon": "e58fb03a4caca4d3d510a20d72bbf153afeb5fe28cf711cf0ab844a2f62e0f76",
+      "platoon/Starving Bandits_2.platoon": "eea41491dbd6c01d690e078e614052d6da62b110e1573949d90754def8e1acba",
+      "platoon/Starving Bandits_3.platoon": "c7d85adbe209855b79482f8058cd414cf9f75b4699a73dbd65f40dda0d1d84e4",
+      "platoon/Starving Bandits_4.platoon": "1c3c208332ae98b13752cd02f0aa869d45ac4adba992562a8793440fcb2bab44",
+      "platoon/Tech Hunters_1.platoon": "dd40c49483e9b248b0626bb9ee1b440722387f0a83410f3723af68fcf9f9671a",
+      "platoon/Tech Hunters_2.platoon": "f10bda1fb6c8e762d5b3860825bfc7266e07ff108ee33226b2751d557abd4dad",
+      "platoon/Tech Hunters_3.platoon": "7b1a1ccaecbadac07395b8e89a58dde6408afbef547ba0c8192771ad21ce8da7",
+      "platoon/Tech Hunters_4.platoon": "1b71318d7e9ff9d44a6b98f1d78a87b67475ec3335a536ff559dc4d6c597ef5e",
+      "platoon/Tech Hunters_6.platoon": "ee08b8c989f906c996fc33ea0d37b62f7fc8379d9ca5435c22c138c7c1035e15",
+      "platoon/Tech Hunters_9.platoon": "b832c70acedc04e2386e9a14097227efefd2be3fb8e2ee5fb8401a5c7e0c3a65",
+      "platoon/Trade Ninjas_0.platoon": "896057c60fff52407d20f1725656a59a5bd1b690e3464a4d5ec15f9b2fe2aa2f",
+      "platoon/Trade Ninjas_1.platoon": "988da7fd432b810caabac43063132c69cfaf1edb845809a5858fc1cdb407c639",
+      "platoon/Wolves_0.platoon": "00ae2b329f599e775ccb9ff06e7ca6bc8dfb74afd70a13c7a7556f8868c597b7",
+      "platoon/Wolves_1.platoon": "e0ce472c845878fc1f8f47299d86dc68fe8b7417054fb0213126f16625288ec3",
+      "platoon/Wolves_4.platoon": "4913137bd28a1ea73250b8323d4daa06cee9ea8c6d8cda882fad28f608e0cd63",
+      "platoon/Wolves_5.platoon": "c999376b2fd946465d76e8a687a1b15473a38a89037d3491fc9a4111173766b3",
+      "platoon/Wolves_6.platoon": "f5d295a4f59f157f96b99876036cb1aa33f85c5d5c8fd5cb2e22e8f3f9ab6caf",
+      "platoon/Голодные бандиты_5.platoon": "ccb8195c01d4a45eee61011258e92114ce0a48a5e8d05b32cde85a38577cc69a",
+      "platoon/Изгои Святой Нации_24.platoon": "17aef600ddc681cbfb846d8c70cd6a4d4e6a367f22991f9169b3ecb5033c8603",
+      "platoon/Пыльные бандиты_197.platoon": "4670bdf1a247735b85d394afa9e36a8b0e52c8fede41be8779bf2c2354ae7917",
+      "platoon/Пыльные бандиты_200.platoon": "06bbe1434da30af0a9df027155fe61affb2e3c65e8b94084109d6d9d18eb1d87",
+      "platoon/Травоядные_7.platoon": "216dcae19176070e3d5ba4298e5665ac31685f65f2e3a2b8dbadfde63176b1d2",
+      "platoon/Травоядные_9.platoon": "e32a49cdd7813ab2c803fbd28b22667cff3eb2829ce45d56e9a7d6d12911b862",
+      "zone/zone.19.31.zone": "33fb0333b2116300c18be1ae400c557e8bbf4c132a874459af405eb3c60eefd2",
+      "zone/zone.20.32.zone": "dffcd9340e747fc657908a6b801c7e253a430959cf6e982dde2bf533ad30c312",
+      "zone/zone.20.33.zone": "d10f9f7e4dc9fd94b97ceb0c0ef4fb795818e5aac13f416098fe3845c5671184",
+      "zone/zone.21.31.zone": "3d91aaf27cc33a20ea3bb87bb296a7f57c9f6148ac4e9888c6fa5e8feb9e1672",
+      "zone/zone.21.32.zone": "1533da2f3f4b886c1eb0a9b3e8d91164deb6649b02311d9699d91014714812cf"
+    }
+  }
+}
