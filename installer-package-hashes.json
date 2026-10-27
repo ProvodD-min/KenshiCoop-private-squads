@@ -1,0 +1,22 @@
+{
+  "KenshiCoop-Setup-Host.exe": {
+    "sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427",
+    "bytes": 67584
+  },
+  "KenshiCoop-Setup-Guest.exe": {
+    "sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427",
+    "bytes": 67584
+  },
+  "INSTALL-RU.md": {
+    "sha256": "c4a517cb300a5c3dae4bfda457f51b50cb5d34da4cbfad865f45c3a35fc50509",
+    "bytes": 10944
+  },
+  "KenshiCoop-installer-source.zip": {
+    "sha256": "203e23bf61c7c8ad361eb0be23e27a71a8e909ab685f0dfb0ad82e066557368f",
+    "bytes": 35888
+  },
+  "installer-test-results.json": {
+    "sha256": "11c160d1be48ad1295f4eb6e44d59ce979141899d84e6ba872e25b41429d3d65",
+    "bytes": 3124
+  }
+}

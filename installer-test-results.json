@@ -1,0 +1,77 @@
+{
+  "result": "PASS",
+  "date": "2026-10-27",
+  "installer_version": "1.0.0",
+  "final_installer_sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427",
+  "external_tests": {
+    "passed": 58,
+    "failed": 0,
+    "source_sha256": "eaef372fc3b2794be1401e15d24b76c9ba2126d42d4bf35d4d690cb6f1b6b601"
+  },
+  "full_installs": [
+    {
+      "role": "host",
+      "result": "PASS",
+      "copied_files": 15548,
+      "copied_bytes": 13177590473,
+      "cyrillic_destination": false,
+      "main_menu": true,
+      "supported_version": "Steam 1.0.65",
+      "private_squads_hooks": true,
+      "compatible_exe_sha256": "504b362cde850d56afb1cea6f5b7b0ee014d9dd7b47e188599d91c804502cd3e",
+      "dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0"
+    },
+    {
+      "role": "join",
+      "result": "PASS",
+      "copied_files": 15548,
+      "copied_bytes": 13177590473,
+      "cyrillic_destination": true,
+      "main_menu": true,
+      "supported_version": "Steam 1.0.65",
+      "private_squads_hooks": true,
+      "compatible_exe_sha256": "504b362cde850d56afb1cea6f5b7b0ee014d9dd7b47e188599d91c804502cd3e",
+      "dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0"
+    }
+  ],
+  "http_downloads": [
+    {
+      "name": "RE_Kenshi_v0.3.5_loose.zip",
+      "sha256": "02245ec39c3a33872579e5d48067619223dfaa63d12b5329aa92d97532a46d6b",
+      "bytes": 21811276,
+      "RESULT": "PASS"
+    },
+    {
+      "name": "KenshiCoop-kit-v0.51.zip",
+      "sha256": "4caa44f55a3d70c1b63a2841e9a60259dc2d8241b54b937e91d9ff91f3aee973",
+      "bytes": 432926,
+      "RESULT": "PASS"
+    },
+    {
+      "name": "KenshiCoop-private-squads.zip",
+      "sha256": "b41cbb60557b90dbd7aabdc19e036d19930a6a5254bde13c687aa5f5017f0dae",
+      "bytes": 4058850,
+      "RESULT": "PASS"
+    }
+  ],
+  "final_cached_download_checks": 3,
+  "final_rebuild": {
+    "resource_only": true,
+    "previous_installer_sha256": "4c6d0f0b375b7dfe904a8a3a40dce431ba6c06cca557ddbe22ccc678c3851eb4",
+    "identical_methods_and_constructors": 123,
+    "explanation": "Only embedded guide wording changed. All method/constructor IL, locals, exception handlers and implementation flags matched the full-install and fresh-HTTP tested executable. Full installs/HTTP were not repeated after this resource-only rebuild."
+  },
+  "original_exe_unchanged_sha256": "a596ab4e407c67b58599c54ffb32dc1bf2b64510cdebd3fa9359ef05a576aeb1",
+  "runtime_downloads": {
+    "official_microsoft_sha256_verified": true,
+    "authenticode_valid": true,
+    "system_runtime_installation_executed": false
+  },
+  "scope": "Installer acceptance tests plus game boot to main menu. Earlier mod multiplayer gameplay tests are reported separately.",
+  "untested": [
+    "Microsoft runtime UAC/elevation, installation and reboot paths (machine already has dependencies)",
+    "External WAN/NAT and actual Steam P2P session between two PCs",
+    "Long campaign and arbitrary third-party mods",
+    "Unknown EXE hashes and GOG editions are unsupported"
+  ]
+}
