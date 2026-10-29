@@ -1,0 +1,71 @@
+{
+  "result": "PASS",
+  "release": "v0.51-private-squads.5.2.1-local",
+  "protocol": 66,
+  "dll_sha256": "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
+  "native_game_executed": true,
+  "game": "Steam Kenshi 1.0.65 x64",
+  "game_exe_sha256": "504b362cde850d56afb1cea6f5b7b0ee014d9dd7b47e188599d91c804502cd3e",
+  "checks": [
+    "exact final DLL in both isolated native processes",
+    "host and guest full340 accepted stock and cash equal",
+    "b-guest-buy native money conserved and one item moved",
+    "b-guest-sale native money conserved and one item moved",
+    "b-guest-buy-ack-wallet confirmed ready without wallet freeze",
+    "b-guest-sale-ack-wallet confirmed ready without wallet freeze",
+    "host wallet unaffected by guest trade",
+    "native guest character ownership verified",
+    "actual closed-shop own inventory bowl drag preserves all items and cash",
+    "closed-shop cursor empty and no UI error",
+    "complete save reloaded on both native clients",
+    "separate wallets survive native reload",
+    "full340 accepted stock survives native reload",
+    "final native guest has no vendor error",
+    "actual newGame clears previous campaign identity",
+    "new world guest sees same nine fresh bodies as host",
+    "new world wallets initialized separately",
+    "new world guest owns guest body and cannot own host body",
+    "fresh save persists owner slots zero through eight",
+    "unsaved new world receives unique bootstrap target",
+    "no access violation traced during final native tests including NEWGAME",
+    "three complete native transfers committed with zero CRC errors"
+  ],
+  "check_count": 22,
+  "stock": {
+    "cash": 25168,
+    "records": 193,
+    "fingerprint": 1260657923,
+    "sha256": "7ee912bb145d0b8a901c704e1d6fe2a10b4ba1742b75c862325bf8f9c7f9136f"
+  },
+  "transfer_commits": [
+    {
+      "files": 128,
+      "bytes": 9793844,
+      "bad_crc": 0
+    },
+    {
+      "files": 122,
+      "bytes": 9579628,
+      "bad_crc": 0
+    },
+    {
+      "files": 40,
+      "bytes": 3827221,
+      "bad_crc": 0
+    }
+  ],
+  "visual_observations": [
+    "Actual title screen displayed streaming61percent and5.7of9.3MB",
+    "Already loaded world displayed streaming21percent and2.0of9.1MB",
+    "Native own inventory bowl visibly moved to empty grid cells after closed trade"
+  ],
+  "network_scope": "two isolated native processes on one physical PC, loopback ENet Porthole profile",
+  "limits": [
+    "No two independent external networks tested",
+    "No eight simultaneous native guest processes tested",
+    "Disconnect recovery has production-body mocked-network tests; this run did not inject every socket failure",
+    "Unacknowledged or unreported mid-trade mutations remain quarantined and require complete host campaign reload",
+    "Separate previously observed host teardown crash has no proven root cause or verified fix"
+  ],
+  "published": false
+}

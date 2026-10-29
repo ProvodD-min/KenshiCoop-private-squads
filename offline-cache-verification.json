@@ -1,0 +1,46 @@
+﻿{
+    "actual_gui_default_selected_adjacent_cache":  true,
+    "actual_Core_Fetch_all_five_packages_verified":  true,
+    "networkFetchPerformed":  false,
+    "download_branch_would_fail_before_network_client":  true,
+    "result":  "PASS",
+    "installer_sha256":  "178d640cea0399dae67a248022b28a858435f93789f173123f471cadd95f9910",
+    "futureReleaseUrlRequired":  false,
+    "embeddedGuideSha256":  "7cfa68335694de67b08aaef4cf8c717cb3fa4dd0f208ae9cb895c11497d15bc8",
+    "protocol":  66,
+    "scope":  "Exact final installer assembly loaded without Main. Actual Options.DefaultCache and Core.Fetch used verified adjacent files; download path prohibited by absent callbacks. No game launch, installation, runtime execution or new network download.",
+    "dll_sha256":  "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
+    "empty_private_fallback_cache_untouched":  true,
+    "packages":  [
+                     {
+                         "sha256":  "02245ec39c3a33872579e5d48067619223dfaa63d12b5329aa92d97532a46d6b",
+                         "component":  "Rek",
+                         "filename":  "RE_Kenshi_v0.3.5_loose.zip",
+                         "bytes":  21811276
+                     },
+                     {
+                         "sha256":  "4caa44f55a3d70c1b63a2841e9a60259dc2d8241b54b937e91d9ff91f3aee973",
+                         "component":  "Kit",
+                         "filename":  "KenshiCoop-kit-v0.51.zip",
+                         "bytes":  432926
+                     },
+                     {
+                         "sha256":  "36ea468bfe7d640d8b1af2e83305745124fd3e0d5a7fe50bc91539f53242d7bb",
+                         "component":  "Mod",
+                         "filename":  "KenshiCoop-update66.zip",
+                         "bytes":  843951
+                     },
+                     {
+                         "sha256":  "f3b7a76d84d23f91957aa18456a14b4e90609e4ce8194c5653384ed38dada6f3",
+                         "component":  "VC10",
+                         "filename":  "vc2010-sp1-x64.exe",
+                         "bytes":  10277328
+                     },
+                     {
+                         "sha256":  "843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c",
+                         "component":  "VC14",
+                         "filename":  "vc14-x64-14.51.36247.exe",
+                         "bytes":  18731856
+                     }
+                 ]
+}

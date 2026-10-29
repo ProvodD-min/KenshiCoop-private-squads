@@ -1,0 +1,76 @@
+{
+  "release": "v0.51-private-squads.5.3",
+  "protocol": 66,
+  "dll_sha256": "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
+  "installer_version": "1.5.3",
+  "files": {
+    "INSTALL-BASE-5.2.md": {
+      "sha256": "79a221acf784e29cebd76802e8dcc636fd4a6cb5d05aca428057d341511ded05",
+      "bytes": 42918
+    },
+    "INSTALL-RU.md": {
+      "sha256": "7cfa68335694de67b08aaef4cf8c717cb3fa4dd0f208ae9cb895c11497d15bc8",
+      "bytes": 43821
+    },
+    "KenshiCoop-Setup-Guest.exe": {
+      "sha256": "178d640cea0399dae67a248022b28a858435f93789f173123f471cadd95f9910",
+      "bytes": 113664
+    },
+    "KenshiCoop-Setup-Host.exe": {
+      "sha256": "178d640cea0399dae67a248022b28a858435f93789f173123f471cadd95f9910",
+      "bytes": 113664
+    },
+    "KenshiCoop-Setup-Offline-v0.51-private-squads.5.3.zip": {
+      "sha256": "fdf45d2718d662946bb86525a4ed2deb35bba5ddef83eb98c2b925a37910f02f",
+      "bytes": 57101201
+    },
+    "KenshiCoop-installer-source.zip": {
+      "sha256": "de42971e1eaad51b69f1a7844d6b7ce698c4a9c4a1df28a5075fcc8d384855db",
+      "bytes": 79985
+    },
+    "KenshiCoop-update66-source.zip": {
+      "sha256": "3c98c7148e5227320b2dc35b6edd95232e1437a6c3d0e3456317a85a29ddf4a0",
+      "bytes": 4518767
+    },
+    "KenshiCoop-update66.zip": {
+      "sha256": "36ea468bfe7d640d8b1af2e83305745124fd3e0d5a7fe50bc91539f53242d7bb",
+      "bytes": 843951
+    },
+    "README-RU.txt": {
+      "sha256": "7cfa68335694de67b08aaef4cf8c717cb3fa4dd0f208ae9cb895c11497d15bc8",
+      "bytes": 43821
+    },
+    "SHA256.json": {
+      "sha256": "ed480ee3c0b4f7656b4f42afb3d07c592c5905c4de261c30b41c17dcad5249f4",
+      "bytes": 4180
+    },
+    "START-HERE-RU.txt": {
+      "sha256": "249cd5522822e41fa4467cf7ae4d954e9195dbe2130a183a239b166865a0e2f7",
+      "bytes": 3470
+    },
+    "installer-test-results.json": {
+      "sha256": "e5185225f4a121a6a8cdc637415097c602dfba87f606813c10ee5c4b7aa93951",
+      "bytes": 2120
+    },
+    "native-verification.json": {
+      "sha256": "defc46864706fc9c35abd615b8ba74a50c5e14d7dfb0e8d893ae61c4b1c29c1c",
+      "bytes": 2992
+    },
+    "offline-cache-verification.json": {
+      "sha256": "1a68d8f2aa53ab76f32c8a6c43413441e8bb698a4d134aca1c1ffffe7658ed5d",
+      "bytes": 2508
+    },
+    "portable-verification.json": {
+      "sha256": "c5a3d3b42ec2988185e93af2678f8fe4e6b43c44bd63847d5d1b57a0fe1ddd3b",
+      "bytes": 2139
+    },
+    "runtime-download-provenance.json": {
+      "sha256": "01891cde16837dfb0f72f28a70841cf89365f17e3e745910dd01bf8c9be7e61b",
+      "bytes": 2914
+    },
+    "verification.json": {
+      "sha256": "1d462228cdd6c0fb0e02e7c92d2a3b81bed40d55037c7ab8167c7e632add5587",
+      "bytes": 131275
+    }
+  }
+}

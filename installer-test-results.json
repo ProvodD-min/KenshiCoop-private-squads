@@ -1,144 +1,41 @@
 {
-  "result": "PASS",
-  "date": "2026-10-27",
-  "installer_version": "1.1.0",
-  "final_installer_sha256": "1b6e35df5bb604a291b34c4c70c2acf8ec77a9c47022caa7f9017aca8a85ccda",
-  "mod_dll_sha256": "bc87c1be6136dcb1d3703f5717478de823370597e0f75a310fc076087ae31a3f",
-  "mod_zip_sha256": "5b1e4ebd54b5dcd0bc5b1a8d3c8097c1f57f36e3f2e6dc94487166559ad2e185",
-  "automated_tests": {
-    "base_passed": 58,
-    "porthole_and_updater_passed": 37,
-    "total_passed": 95,
-    "total_failed": 0,
-    "previous_dll_upgrade_and_tampered_package_checks_executed": true,
-    "source_sha256": "32b124750b8a2c9594b3b5704c6f04aaf45e275286d3c5f00ee1c8a36d3ad987",
-    "base_test_source_sha256": "eaef372fc3b2794be1401e15d24b76c9ba2126d42d4bf35d4d690cb6f1b6b601",
-    "porthole_test_source_sha256": "b4b65150d83a58120e75b673c9ff142a2e0578a31761abf58e17aa4b75a5c7eb"
+  "development": false,
+  "installer_version": "1.5.3",
+  "dll_sha256": "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
+  "archive_sha256": "36ea468bfe7d640d8b1af2e83305745124fd3e0d5a7fe50bc91539f53242d7bb",
+  "suites": {
+    "InstallerTests": {
+      "exit_code": 0,
+      "summary": "InstallerTests: 58 passed; 0 failed",
+      "skipped": false
+    },
+    "PortholeInstallerTests": {
+      "exit_code": 0,
+      "summary": "PortholeInstallerTests: 49 passed; 0 failed",
+      "skipped": false
+    },
+    "Migration52Tests": {
+      "exit_code": 0,
+      "summary": "Migration52Tests: 48 passed; 0 failed",
+      "skipped": false
+    }
   },
-  "actual_in_place_upgrades": {
-    "passed": 2,
-    "roles": [
-      {
-        "role": "host",
-        "result": "PASS",
-        "destination_with_cyrillic": false,
-        "previous_installer_version": "1.0.0",
-        "new_installer_version": "1.1.0",
-        "old_dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
-        "new_dll_sha256": "bc87c1be6136dcb1d3703f5717478de823370597e0f75a310fc076087ae31a3f",
-        "new_launcher_sha256": "1b6e35df5bb604a291b34c4c70c2acf8ec77a9c47022caa7f9017aca8a85ccda",
-        "immutable_files_unchanged": 15661,
-        "immutable_bytes_unchanged": 13289736843,
-        "data_files_unchanged": 15225,
-        "data_bytes_unchanged": 11993139892,
-        "immutable_tree_sha256_before": "c891d6b564968f96589ea38fbb132fc45380e70006d51c1007caa6aba6010896",
-        "immutable_tree_sha256_after": "c891d6b564968f96589ea38fbb132fc45380e70006d51c1007caa6aba6010896",
-        "data_tree_sha256_before": "9527c9258f065bbe2c2baffd9116e819b349fe411ac9d382e168cf8db8d1d0bb",
-        "data_tree_sha256_after": "9527c9258f065bbe2c2baffd9116e819b349fe411ac9d382e168cf8db8d1d0bb",
-        "save_directory_existed_before": false,
-        "save_directory_existed_after": false,
-        "exact_backup_of_previous_mutable_files_verified": true,
-        "previous_mutable_file_hashes": {
-          "mods/KenshiCoop/coop_config.json": {
-            "sha256": "67eff0ec1cd9d5246ade398610ccfa9cb18e607853156f7eca90535f5726dd9f",
-            "bytes": 99
-          },
-          "KenshiCoop-Play.exe": {
-            "sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427",
-            "bytes": 67584
-          },
-          "INSTALL-RU.md": {
-            "sha256": "c4a517cb300a5c3dae4bfda457f51b50cb5d34da4cbfad865f45c3a35fc50509",
-            "bytes": 10944
-          },
-          "KenshiCoop-install.json": {
-            "sha256": "bf8200a6457bf769e18cd559892ed3095479e9931837ff0e9831c07774ef32f0",
-            "bytes": 402
-          },
-          "mods/KenshiCoop/KenshiCoop.dll": {
-            "sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
-            "bytes": 1068544
-          }
-        },
-        "network_config": {
-          "transport": "udp",
-          "profile": "porthole",
-          "address": "127.0.0.1",
-          "port": 27940,
-          "auto_connect": false
-        }
-      },
-      {
-        "role": "join",
-        "result": "PASS",
-        "destination_with_cyrillic": true,
-        "previous_installer_version": "1.0.0",
-        "new_installer_version": "1.1.0",
-        "old_dll_sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
-        "new_dll_sha256": "bc87c1be6136dcb1d3703f5717478de823370597e0f75a310fc076087ae31a3f",
-        "new_launcher_sha256": "1b6e35df5bb604a291b34c4c70c2acf8ec77a9c47022caa7f9017aca8a85ccda",
-        "immutable_files_unchanged": 15661,
-        "immutable_bytes_unchanged": 13289685334,
-        "data_files_unchanged": 15225,
-        "data_bytes_unchanged": 11993139892,
-        "immutable_tree_sha256_before": "6cabaa17df8e1c109964e2dd9de9f51988294f15104758fc831ee6627676d720",
-        "immutable_tree_sha256_after": "6cabaa17df8e1c109964e2dd9de9f51988294f15104758fc831ee6627676d720",
-        "data_tree_sha256_before": "9527c9258f065bbe2c2baffd9116e819b349fe411ac9d382e168cf8db8d1d0bb",
-        "data_tree_sha256_after": "9527c9258f065bbe2c2baffd9116e819b349fe411ac9d382e168cf8db8d1d0bb",
-        "save_directory_existed_before": false,
-        "save_directory_existed_after": false,
-        "exact_backup_of_previous_mutable_files_verified": true,
-        "previous_mutable_file_hashes": {
-          "mods/KenshiCoop/coop_config.json": {
-            "sha256": "a11f835d3735297f9c4eec8266fa762d2ef06517fc0de5d9582cf34067219c64",
-            "bytes": 99
-          },
-          "KenshiCoop-Play.exe": {
-            "sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427",
-            "bytes": 67584
-          },
-          "INSTALL-RU.md": {
-            "sha256": "c4a517cb300a5c3dae4bfda457f51b50cb5d34da4cbfad865f45c3a35fc50509",
-            "bytes": 10944
-          },
-          "KenshiCoop-install.json": {
-            "sha256": "419914b6275699e8d88018065733850687fa2efa5ad73c2d5357d645f89ad4f2",
-            "bytes": 402
-          },
-          "mods/KenshiCoop/KenshiCoop.dll": {
-            "sha256": "26b784b64476cb6655b276f26e4e062dd0e2b98f0f2e247a05d65132809d34b0",
-            "bytes": 1068544
-          }
-        },
-        "network_config": {
-          "transport": "udp",
-          "profile": "porthole",
-          "address": "127.0.0.1",
-          "port": 27941,
-          "auto_connect": false
-        }
-      }
-    ]
+  "source_inputs": {
+    "KenshiCoopSetup.cs": "3fc77915f7765dc2273d8e1c834380f54264516e0500f5c08390f3298d7954f5",
+    "build.ps1": "d2e5278fc09355825a4b195a6e68bb1ff82d73b2617dff3da74f0a7fe0175c42",
+    "configure_payload.py": "c1fce39cef766caf8ac4572c44ee44c11895977531b2935f5308191518a15f16",
+    "INSTALL-RU.md": "7cfa68335694de67b08aaef4cf8c717cb3fa4dd0f208ae9cb895c11497d15bc8",
+    "README.md": "0d7f59a8e0492fabbc0b2b8266c19e79963c266973e0cf4eb8e6585816d7373f",
+    "LICENSE": "6f1e622c82a380075843bb084a7ec3b1f1d12a4a02526d75e78b0924a860aa75",
+    "payload-pins.json": "511ec79354eedf330d6884f4c9c218e391374fb40d62affcb3102f2ef9636969",
+    "tests/InstallerTests.cs": "57f48fa28c3ead971e27a913ac51ed482ceb012fed32c6cd61ce0bd201716e83",
+    "tests/PortholeInstallerTests.cs": "ac4ad749923fc084075a19a0a1c9c56a14d070553ce117fc19a907c0d370b639",
+    "tests/Migration52Tests.cs": "066b53c7f356b42f744b20ea591f76c776060bd4847e541c1a184a66715c0625",
+    "run_isolated_tests.py": "d74865318f8087b4f8fcae1107d20a7fe3c8721289cfbfbadf6893d2c5b9f77e",
+    "INSTALL-BASE-5.2.md": "79a221acf784e29cebd76802e8dcc636fd4a6cb5d05aca428057d341511ded05",
+    "FINAL-BUILD-NOTES.txt": "dd1fa5b62435d6c3932565ceaea5e01b5d65ed7e36f821fae48d3eda900912e6"
   },
-  "original_steam_exe_unchanged_sha256": "a596ab4e407c67b58599c54ffb32dc1bf2b64510cdebd3fa9359ef05a576aeb1",
-  "tree_hash_recipe": "SHA-256 of UTF-8 JSON mapping relative paths to {sha256,bytes}, sorted keys, compact separators, ensure_ascii=false. Private file lists are retained locally; only aggregate roots are published.",
-  "save_preservation_scope": "Neither complete test copy had a save directory before the upgrade, and none was created. Preservation of existing save content was independently checked using save sentinels in the 37 production-Core fixture tests.",
-  "current_version_scope": "Version 1.1.0: 95 fixture checks and actual in-place upgrades of two complete game copies. New full installations and game boots were not repeated as part of this installer suite. Real Porthole/Kenshi gameplay tests are documented separately.",
-  "historical_installer_tests": {
-    "version": "1.0.0",
-    "full_installations_passed": 2,
-    "game_main_menu_boots_passed": 2,
-    "repeated_for_version_1_1_0": false,
-    "previous_final_installer_sha256": "80434fa7b9255ba460e7aaf92013c0ce42923f0826ad89ee9039bec2d6ff7427"
-  },
-  "not_executed_in_this_suite": [
-    "Fresh HTTP downloads of the new mod package; verified cached package used",
-    "Game launch or Steam/Porthole lobby/network session",
-    "Microsoft runtime installation, UAC elevation or reboot",
-    "A new full 13 GB game copy"
-  ],
-  "known_limits": [
-    "External WAN/NAT and two-PC compatibility require separate testing evidence",
-    "Long campaign, all third-party mods and all recruit/shop variations are not covered by installer acceptance tests"
-  ]
+  "installer_sha256": "178d640cea0399dae67a248022b28a858435f93789f173123f471cadd95f9910",
+  "source_inputs_unchanged_during_build_and_tests": true,
+  "result": "PASS"
 }
