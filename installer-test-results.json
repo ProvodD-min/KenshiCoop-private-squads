@@ -1,8 +1,8 @@
 {
   "development": false,
-  "installer_version": "1.5.3",
-  "dll_sha256": "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
-  "archive_sha256": "36ea468bfe7d640d8b1af2e83305745124fd3e0d5a7fe50bc91539f53242d7bb",
+  "installer_version": "1.5.3.1",
+  "dll_sha256": "63526c72f9873dbdf5d4471f419b0593d4d3d7ea0263ae55ce9aba613aefa9bb",
+  "archive_sha256": "bf8dcce90bea6ca86b58eed2ee2b869139802c180dc8a8abef4ce138f6f9abdd",
   "suites": {
     "InstallerTests": {
       "exit_code": 0,
@@ -16,26 +16,26 @@
     },
     "Migration52Tests": {
       "exit_code": 0,
-      "summary": "Migration52Tests: 48 passed; 0 failed",
+      "summary": "Migration52Tests: 52 passed; 0 failed",
       "skipped": false
     }
   },
   "source_inputs": {
-    "KenshiCoopSetup.cs": "3fc77915f7765dc2273d8e1c834380f54264516e0500f5c08390f3298d7954f5",
-    "build.ps1": "d2e5278fc09355825a4b195a6e68bb1ff82d73b2617dff3da74f0a7fe0175c42",
-    "configure_payload.py": "c1fce39cef766caf8ac4572c44ee44c11895977531b2935f5308191518a15f16",
-    "INSTALL-RU.md": "7cfa68335694de67b08aaef4cf8c717cb3fa4dd0f208ae9cb895c11497d15bc8",
-    "README.md": "0d7f59a8e0492fabbc0b2b8266c19e79963c266973e0cf4eb8e6585816d7373f",
+    "KenshiCoopSetup.cs": "38d157b738f9987d6cb17b256753a90e235ccbcf6800ab4b06387dd0dcd2e8f2",
+    "build.ps1": "a4f28f651f9e16a6a20fbe6f62cc7fd8352786bedde4c8d0239783ac49cc80ff",
+    "configure_payload.py": "9f9b60ce08d2a884536f0d1953f9bd9bad21e1e75b19e8235ad88c5fe40a7d54",
+    "INSTALL-RU.md": "260d0ac3a61f786b3526747f52bc10cc90fbc4d2700c3d994cafdf67ef062aba",
+    "README.md": "61ac7a7fd436b2b2f0074021d71886297774dce298fea2332d3eeadfc7c18a31",
     "LICENSE": "6f1e622c82a380075843bb084a7ec3b1f1d12a4a02526d75e78b0924a860aa75",
-    "payload-pins.json": "511ec79354eedf330d6884f4c9c218e391374fb40d62affcb3102f2ef9636969",
+    "payload-pins.json": "a0828bccfdd6c892acdb200cf562ba1ce6d5fd31ac394c500256180fca2b4eb4",
     "tests/InstallerTests.cs": "57f48fa28c3ead971e27a913ac51ed482ceb012fed32c6cd61ce0bd201716e83",
     "tests/PortholeInstallerTests.cs": "ac4ad749923fc084075a19a0a1c9c56a14d070553ce117fc19a907c0d370b639",
-    "tests/Migration52Tests.cs": "066b53c7f356b42f744b20ea591f76c776060bd4847e541c1a184a66715c0625",
-    "run_isolated_tests.py": "d74865318f8087b4f8fcae1107d20a7fe3c8721289cfbfbadf6893d2c5b9f77e",
+    "tests/Migration52Tests.cs": "a8181eafff96e84b885132d138ae5315c2fbd7a02e114595cb3c8bf92820a51c",
+    "run_isolated_tests.py": "8cf1375a7e4610c9f38e6c3d0492d3653d9e6f0f354584030705911a39792696",
     "INSTALL-BASE-5.2.md": "79a221acf784e29cebd76802e8dcc636fd4a6cb5d05aca428057d341511ded05",
-    "FINAL-BUILD-NOTES.txt": "dd1fa5b62435d6c3932565ceaea5e01b5d65ed7e36f821fae48d3eda900912e6"
+    "FINAL-BUILD-NOTES.txt": "9caf65eee7dabb44159e891d1fbc7dbc2bfa5ecaee78afaf24c74ee18467e1b6"
   },
-  "installer_sha256": "178d640cea0399dae67a248022b28a858435f93789f173123f471cadd95f9910",
+  "installer_sha256": "f8bc3c574403719f5e8f24ad590550589956e3e8c47c81718e8b25176d886ef9",
   "source_inputs_unchanged_during_build_and_tests": true,
   "result": "PASS"
 }

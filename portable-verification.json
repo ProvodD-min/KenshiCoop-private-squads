@@ -1,67 +1,22 @@
 {
   "result": "PASS",
   "protocol": 66,
-  "dll_sha256": "eb1019ae40979eab99830465fc14980a1302759b0722ccab25bdd99fcbd731ff",
-  "checks": 925,
+  "dll_sha256": "63526c72f9873dbdf5d4471f419b0593d4d3d7ea0263ae55ce9aba613aefa9bb",
+  "checks": 550,
+  "native_game_executed": false,
   "suites": [
     {
       "suite": "protocol",
       "checks": 530,
-      "result": "PASS",
-      "evidence_sha256": "2710a720519adaec92e09734bcad8220d74b74ea2970b55bb67d20ba29f4f9e1",
-      "native_game_executed": false
+      "result": "PASS"
     },
     {
-      "suite": "coordinator",
-      "checks": 197,
-      "result": "PASS",
-      "evidence_sha256": "bc50f15144d13d5cdf5e72a936153f2b20b8b10e9d72713fc3f4776397721ef6",
-      "native_game_executed": false
-    },
-    {
-      "suite": "disconnect_recovery",
-      "checks": 102,
-      "result": "PASS",
-      "evidence_sha256": "d9b34cc8a4859cf39c9778b4ef15f7a63fd432c24e05ffd4030bb975e1ec362e",
-      "native_game_executed": false
-    },
-    {
-      "suite": "native_vendor_context",
-      "checks": 26,
-      "result": "PASS",
-      "evidence_sha256": "9695c1e7d50b86f7357ccd79a76c6f5e67ab450be5026cd22ae451ce9dad6fcd",
-      "native_game_executed": false
-    },
-    {
-      "suite": "save_snapshot_win32",
-      "checks": 28,
-      "result": "PASS",
-      "evidence_sha256": "b358959201797f45de5459f881ec2d7a2cf30913507641867525b956208256a6",
-      "native_game_executed": false
-    },
-    {
-      "suite": "newgame_boundary",
-      "checks": 11,
-      "result": "PASS",
-      "evidence_sha256": "283508c5c67cb372dd5bcf428a8a8b25e4dd0b0ae1032564f82e96cd2230f2c0",
-      "native_game_executed": false
-    },
-    {
-      "suite": "fresh_bootstrap",
-      "checks": 11,
-      "result": "PASS",
-      "evidence_sha256": "4db5f2b8efb85fc1e2d053aeed53377e3cc9c07c56990dbba644b41e803926aa",
-      "native_game_executed": false
-    },
-    {
-      "suite": "identity_save_fence",
+      "suite": "production_charge_reconcile",
       "checks": 20,
       "result": "PASS",
-      "negative_controls_detected": 5,
-      "native_game_executed": false
+      "negative_controls": 4,
+      "production_translation_unit_compile": "PASS"
     }
   ],
-  "source_input_count": 1003,
-  "all_build_inputs_still_match": true,
-  "scope": "Actual production bodies with stated Win32 and mocked native/network fixtures; native game tests are separate."
+  "scope": "Protocol and extracted actual production body; native game evidence is separate."
 }
